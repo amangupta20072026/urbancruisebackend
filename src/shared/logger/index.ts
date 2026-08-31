@@ -1,0 +1,1 @@
+// # pino instance — JSON to stdout, level from env, redact paths applied

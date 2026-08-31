@@ -1,0 +1,1 @@
+// # withTransaction(fn) — getConnection → beginTx → commit/rollback → release

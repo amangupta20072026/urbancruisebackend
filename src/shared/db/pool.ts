@@ -1,0 +1,1 @@
+//  # mysql2/promise singleton pool, enableKeepAlive, prepared statements

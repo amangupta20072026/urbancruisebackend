@@ -1,0 +1,1 @@
+//  # base class: statusCode, code, message, details, cause, isOperational

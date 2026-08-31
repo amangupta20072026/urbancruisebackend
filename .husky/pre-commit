@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+# Pre-commit gate — cheap fast checks only. Anything slow belongs in CI.
+#   1. lint-staged  → ESLint + Prettier on staged files (fast, <1s typical)
+#   2. typecheck    → project-wide `tsc --noEmit` (catches cross-file type breaks)
+#   3. depcruise    → architecture boundaries (modular-monolith invariants)
+
+npx lint-staged
+npm run typecheck
+npm run depcruise

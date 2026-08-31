@@ -1,45 +1,27 @@
 /**
- * ==========================================================================
+ * ==============================================================================
  * Non-secret application constants
- * --------------------------------------------------------------------------
- * Anything that could conceivably change per environment goes in ENV.
- * Anything that's a compile-time truth (defaults, limits) lives here.
- * ==========================================================================
+ * ==============================================================================
+ * Anything a security auditor should NOT see in .env goes here. If a value
+ * changes per environment it belongs in env.ts. If it never changes, it
+ * belongs here.
+ * ==============================================================================
  */
 
-// --------------------------------------------------------------------------
-// HTTP headers used across the app
-// --------------------------------------------------------------------------
-export const HEADER = {
-  REQUEST_ID: 'x-request-id',
-  FORWARDED_FOR: 'x-forwarded-for',
-  FORWARDED_PROTO: 'x-forwarded-proto',
-  AUTHORIZATION: 'authorization',
-} as const;
+export const JSON_BODY_LIMIT = '10mb';
+export const URLENCODED_BODY_LIMIT = '10mb';
 
-// --------------------------------------------------------------------------
-// Pagination defaults
-// --------------------------------------------------------------------------
-export const PAGINATION = {
-  DEFAULT_PAGE: 1,
-  DEFAULT_PAGE_SIZE: 20,
-  MAX_PAGE_SIZE: 100,
-} as const;
+/** Default pagination page size when the caller doesn't specify one. */
+export const DEFAULT_PAGE_SIZE = 20;
+/** Max page size we'll honor even if the caller asks for more. */
+export const MAX_PAGE_SIZE = 100;
 
-// --------------------------------------------------------------------------
-// Body-size limits
-// --------------------------------------------------------------------------
-export const BODY_LIMIT = {
-  JSON: '10mb',
-  URLENCODED: '10mb',
-} as const;
+/** Request timeout — belt to Nginx's braces. */
+export const REQUEST_TIMEOUT_MS = 30_000;
 
-// --------------------------------------------------------------------------
-// Timeouts
-// --------------------------------------------------------------------------
-export const SHUTDOWN = {
-  // Time to wait for in-flight requests to finish before force-exiting.
-  // Should be < PM2's kill_timeout (currently 15s) so PM2 doesn't SIGKILL
-  // us mid-drain.
-  GRACE_MS: 10_000,
-} as const;
+/** How long the graceful shutdown drain has before we hard-exit. */
+export const SHUTDOWN_TIMEOUT_MS = 15_000;
+
+/** Header names — centralize spelling so no one typoes 'X-Request-ID' vs 'X-Request-Id'. */
+export const HEADER_REQUEST_ID = 'x-request-id';
+export const HEADER_AUTHORIZATION = 'authorization';

@@ -1,68 +1,60 @@
 /**
- * ==========================================================================
- * PM2 ecosystem — Urban Cruise Backend
- * --------------------------------------------------------------------------
- * Deploy with:
- *   npm ci --omit=dev
- *   npm run build
- *   pm2 start ecosystem.config.cjs --env production
- *   pm2 save                    # persist across reboots
- *   pm2 startup                 # generate init script (one-time)
+ * ==============================================================================
+ * PM2 ecosystem config
+ * ==============================================================================
+ * Usage on the server (after `npm ci --omit=dev && npm run build`):
  *
- * Reload with zero downtime:
- *   pm2 reload urbancruise-api
+ *     pm2 start ecosystem.config.cjs --env production
+ *     pm2 save
+ *     pm2 startup           # generate systemd bootstrap
  *
- * Logs:
- *   pm2 logs urbancruise-api            # tail
- *   pm2 flush urbancruise-api           # clear
- *
- * NOTE on cluster mode:
- *   `instances: 'max'` forks one worker per CPU core. This makes the app
- *   horizontally scalable across cores of a single box. The catch is that
- *   express-rate-limit's default MemoryStore is per-process — so N workers
- *   means N independent rate-limit buckets per IP. Once you're serious
- *   about rate limiting under cluster, add ioredis + rate-limit-redis.
- *   Until then, either run `instances: 1` OR accept the fan-out.
- * ==========================================================================
+ * Notes:
+ *   - `exec_mode: 'cluster'` + `instances: 'max'` runs one worker per CPU core.
+ *     Node's event loop is single-threaded — cluster is how you use the box.
+ *   - `wait_ready: true` + `listen_timeout` require the app to call
+ *     `process.send('ready')` after the HTTP server has bound. Prevents PM2
+ *     from routing traffic to a not-yet-ready worker. See src/server.ts.
+ *   - `kill_timeout` is a hard-cap on graceful shutdown. src/server.ts drains
+ *     within this window; anything longer means requests get force-killed.
+ *   - Logs go to ./logs, which is gitignored. In prod, ship stdout via a log
+ *     agent (Loki / CloudWatch / Datadog) — PM2 files are the fallback.
+ * ==============================================================================
  */
 module.exports = {
   apps: [
     {
       name: 'urbancruise-api',
-      script: './dist/index.js',
-      instances: 'max',
+      script: 'dist/index.js',
       exec_mode: 'cluster',
+      instances: 'max',
 
-      // Reload behaviour
-      wait_ready: false,          // set true once index.ts calls process.send('ready')
-      listen_timeout: 10000,
-      kill_timeout: 15000,        // ms to wait for graceful shutdown before SIGKILL
-
-      // Restart policy
+      // Prod defaults; per-env overrides below.
+      node_args: '--enable-source-maps',
+      max_memory_restart: '768M',
       autorestart: true,
-      max_restarts: 10,
-      min_uptime: '30s',
       restart_delay: 2000,
-      exp_backoff_restart_delay: 100,
+      max_restarts: 10,
+      min_uptime: '10s',
 
-      // Memory watchdog
-      max_memory_restart: '512M',
+      // Coordinated startup — PM2 waits for `process.send('ready')`.
+      wait_ready: true,
+      listen_timeout: 15000,
 
-      // Logs (files) — Pino also writes JSON to stdout; PM2 collects it here
-      out_file: './logs/pm2-out.log',
-      error_file: './logs/pm2-err.log',
+      // Coordinated shutdown — PM2 sends SIGINT, expects clean exit inside window.
+      shutdown_with_message: false,
+      kill_timeout: 15000,
+
+      // Logs
+      out_file: './logs/access.log',
+      error_file: './logs/error.log',
       merge_logs: true,
-      time: true,
+      log_date_format: 'YYYY-MM-DD HH:mm:ss.SSS Z',
 
-      // Watch is for dev only; production reloads via `pm2 reload`
-      watch: false,
-
-      // Env: dev defaults live in .env; PM2 env is only for the two below.
-      env: {
-        NODE_ENV: 'development',
-      },
       env_production: {
         NODE_ENV: 'production',
+      },
+      env_development: {
+        NODE_ENV: 'development',
       },
     },
   ],

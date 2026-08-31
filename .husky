@@ -1,0 +1,16 @@
+#!/usr/bin/env sh
+# ==========================================================================
+# Pre-commit hook — Urban Cruise Backend
+# --------------------------------------------------------------------------
+# 1. lint-staged runs eslint --fix + prettier --write on staged files only.
+# 2. typecheck: full-project `tsc --noEmit`. Fast; runs incrementally in tsc.
+# 3. depcruise: architecture boundary check across the whole codebase.
+#
+# Any step failing aborts the commit. Bypass with `git commit --no-verify`
+# in emergencies only.
+# ==========================================================================
+set -e
+
+npx lint-staged
+npm run typecheck
+npm run depcruise

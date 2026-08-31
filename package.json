@@ -1,7 +1,7 @@
 {
   "name": "urbancruisebackend",
   "version": "1.0.0",
-  "description": "",
+  "description": "Backend API for Urban Cruise, providing secure, reliable and scalable services for the company's mobile applications.",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
     "typescript": "tsc --noEmit",
     "lint": "eslint ."
   },
-  "keywords": [],
+  "keywords": ["urban-cruise", "backend", "api", "typescript", "express", "mysql"],
   "author": "urban cruise",
   "license": "ISC",
   "devDependencies": {
@@ -21,6 +21,8 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/morgan": "^1.9.10",
+    "@types/multer": "^2.2.0",
     "@types/node": "^26.3.0",
     "eslint": "^10.9.1",
     "globals": "^17.11.0",
@@ -30,6 +32,7 @@
     "typescript-eslint": "^8.68.0"
   },
   "dependencies": {
+    "axios": "^1.20.0",
     "bcrypt": "^6.0.0",
     "compression": "^1.8.1",
     "cors": "^2.8.6",
@@ -39,6 +42,8 @@
     "express-validator": "^7.3.2",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
+    "morgan": "^1.12.0",
+    "multer": "^2.3.0",
     "mysql2": "^3.24.2",
     "pino": "^10.3.1",
     "pino-pretty": "^13.1.3",

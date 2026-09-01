@@ -45,7 +45,7 @@ export function signRefreshToken(
 
 export function verifyAccessToken(token: string): AccessTokenClaims {
   try {
-    return jwt.verify(token, ENV.JWT_ACCESS_SECRET) as AccessTokenClaims;
+    return jwt.verify(token, ENV.JWT_ACCESS_SECRET, { algorithms: ['HS256'] }) as AccessTokenClaims;
   } catch (err) {
     throw new AuthError('Access token is invalid or expired.', 'AUTH_INVALID_TOKEN', {
       cause: (err as Error).message,
@@ -55,7 +55,9 @@ export function verifyAccessToken(token: string): AccessTokenClaims {
 
 export function verifyRefreshToken(token: string): RefreshTokenClaims {
   try {
-    return jwt.verify(token, ENV.JWT_REFRESH_SECRET) as RefreshTokenClaims;
+    return jwt.verify(token, ENV.JWT_REFRESH_SECRET, {
+      algorithms: ['HS256'],
+    }) as RefreshTokenClaims;
   } catch (err) {
     throw new AuthError('Refresh token is invalid or expired.', 'AUTH_INVALID_REFRESH', {
       cause: (err as Error).message,

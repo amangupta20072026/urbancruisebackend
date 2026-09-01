@@ -9,13 +9,13 @@ import { z } from 'zod';
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '../../config/constants.js';
 
 /** UUID v4 (upper- or lower-case) — matches crypto.randomUUID output. */
-export const UuidSchema = z.string().uuid();
+export const UuidSchema = z.uuid(); // top-level in request body
 
 /** Loose ID string — some legacy tables use non-UUID keys. */
 export const IdSchema = z.string().min(1).max(64);
 
 /** ISO 8601 datetime. */
-export const IsoDateTimeSchema = z.string().datetime({ offset: true });
+export const IsoDateTimeSchema = z.iso.datetime({ offset: true }); // moved under z.iso
 
 /**
  * India phone in E.164 (e.g. +919812345678). Backend-only; when we add

@@ -23,7 +23,6 @@ export type Paginated<T> = {
   requestId: string;
 };
 
-/** Error envelope — matches ADR 0004. */
 export type ErrorEnvelope = {
   error: {
     code: string;

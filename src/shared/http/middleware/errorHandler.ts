@@ -6,9 +6,7 @@
  *   1. `AppError` → its own statusCode + code + message + optional details.
  *   2. Anything else → 500 SERVER_ERROR. Stack logged, never returned.
  *   3. Log level: error for 5xx / non-operational; warn for 4xx.
- *   4. Response envelope matches ADR 0004:
- *        { error: { code, message, requestId, details? } }
- *   5. Includes the request-id so support can find the log line.
+ *   4. Includes the request-id so support can find the log line.
  * ==============================================================================
  */
 import type { ErrorRequestHandler } from 'express';

@@ -28,22 +28,25 @@ export function validate(schemas: Schemas): RequestHandler {
   return (req, _res, next) => {
     if (schemas.body) {
       const r = schemas.body.safeParse(req.body);
-      if (!r.success)
+      if (!r.success) {
         throw new ValidationError('Invalid request body.', r.error.issues, 'VALIDATION_BODY');
+      }
       req.body = r.data;
     }
     if (schemas.params) {
       const r = schemas.params.safeParse(req.params);
-      if (!r.success)
+      if (!r.success) {
         throw new ValidationError('Invalid path parameters.', r.error.issues, 'VALIDATION_PARAMS');
+      }
       // Express types req.params as ParamsDictionary (Record<string,string>).
       // The Zod-parsed shape is the source of truth — cast at the boundary.
       req.params = r.data as ParamsDictionary;
     }
     if (schemas.query) {
       const r = schemas.query.safeParse(req.query);
-      if (!r.success)
+      if (!r.success) {
         throw new ValidationError('Invalid query string.', r.error.issues, 'VALIDATION_QUERY');
+      }
       // Express 5's req.query is a getter-only ParsedQs — write back via defineProperty.
       Object.defineProperty(req, 'query', {
         value: r.data as ParsedQs,

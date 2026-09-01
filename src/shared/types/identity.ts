@@ -22,7 +22,6 @@ export type Identity = {
    *   vendor   → vendor_id
    *   driver   → driver_id
    *   uc       → uc_user_id
-   * EVERY repository query MUST bind this to its WHERE clause. See ADR 0003.
    */
   entityId: string;
 };

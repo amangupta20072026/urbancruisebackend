@@ -3,8 +3,8 @@
  * AppError — base of the error hierarchy
  * ==============================================================================
  * Every deliberately-thrown error in the codebase is a subclass of AppError.
- * The final `errorHandler` middleware translates AppError → HTTP envelope
- * (ADR 0004). Anything that is NOT an AppError is treated as a 500 bug and
+ * The final `errorHandler` middleware translates AppError instances into HTTP responses.
+ * Anything that is NOT an AppError is treated as a 500 bug and
  * logged with `err.stack`.
  *
  * Rules:

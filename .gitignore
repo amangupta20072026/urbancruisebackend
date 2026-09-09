@@ -5,6 +5,7 @@ node_modules/
 jspm_packages/
 logs/
 .husky/_
+.well-known/
 
 # ===================================
 # Build output

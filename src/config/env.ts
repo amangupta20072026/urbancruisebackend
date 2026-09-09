@@ -18,6 +18,10 @@ import { z } from 'zod';
 
 const durationRegex = /^\d+(ms|s|m|h|d)$/;
 
+const secretSchema = z
+  .string()
+  .refine(s => Buffer.byteLength(s, 'utf8') >= 32, 'must be at least 32 bytes');
+
 const schema = z.object({
   // ── App ─────────────────────────────────────────────────────────────────
   NODE_ENV: z.enum(['development', 'production']).default('development'),
@@ -45,9 +49,14 @@ const schema = z.object({
   DB_POOL_LIMIT: z.coerce.number().int().positive().max(200).default(20),
   DB_CONNECT_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
 
+  // ── Redis ───────────────────────────────────────────────────────────────
+  REDIS_HOST: z.string().min(1),
+  REDIS_PORT: z.coerce.number().int().positive().max(65535).default(6379),
+  REDIS_PASSWORD: z.string().min(1),
+
   // ── JWT ─────────────────────────────────────────────────────────────────
-  JWT_ACCESS_SECRET: z.string().min(32, 'must be at least 32 bytes'),
-  JWT_REFRESH_SECRET: z.string().min(32, 'must be at least 32 bytes'),
+  JWT_ACCESS_SECRET: secretSchema,
+  JWT_REFRESH_SECRET: secretSchema,
   JWT_ACCESS_TTL: z.string().regex(durationRegex, 'format: 15m | 1h | 30s | 7d').default('1h'),
   JWT_REFRESH_TTL: z.string().regex(durationRegex, 'format: 15m | 1h | 30s | 7d').default('30d'),
 

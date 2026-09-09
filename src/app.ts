@@ -32,6 +32,7 @@ import { errorHandler } from './shared/http/middleware/errorHandler.js';
 
 // Modules
 import healthModule from './modules/health/index.js';
+import authModule from './modules/auth/index.js';
 
 export function buildApp(): Express {
   const app = express();
@@ -62,9 +63,9 @@ export function buildApp(): Express {
   // 8. Modules
   //    Every module exports `mount(): Router`. Base paths are decided here.
   app.use('/', healthModule.mount()); // /health + /ready
+  app.use('/auth', authModule.mount());
 
   // TODO(step-2): mount business modules
-  // app.use('/auth',          authModule.mount());
   // app.use('/customer',      customerModule.mount());
   // app.use('/vendor',        vendorModule.mount());
   // app.use('/driver',        driverModule.mount());

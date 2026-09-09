@@ -12,8 +12,15 @@
  * ==============================================================================
  */
 import './config/env.js';
+import { verifyConnection } from './shared/db/pool.js';
 import { buildApp } from './app.js';
 import { createServer } from './server.js';
+
+try {
+  await verifyConnection();
+} catch {
+  process.exit(1);
+}
 
 const app = buildApp();
 createServer(app);

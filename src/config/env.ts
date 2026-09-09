@@ -54,6 +54,26 @@ const schema = z.object({
   REDIS_PORT: z.coerce.number().int().positive().max(65535).default(6379),
   REDIS_PASSWORD: z.string().min(1),
 
+  // ── MSG91 ───────────────────────────────────────────────────────────────
+  // MSG91_AUTH_KEY — server-side auth key. Never ship in the RN app.
+  MSG91_AUTH_KEY: z.string().min(1),
+  // WhatsApp template + integration for OTP flow. Approved by Meta in advance.
+  MSG91_WA_INTEGRATED_NUMBER: z.string().min(1),
+  MSG91_WA_TEMPLATE_NAME: z.string().min(1),
+  // SMS fallback route (transactional). Sender ID must be pre-approved.
+  MSG91_SMS_SENDER_ID: z.string().min(3).max(11),
+  MSG91_SMS_TEMPLATE_ID: z.string().min(1),
+  // HMAC secret used to verify MSG91 delivery-webhook signatures.
+  MSG91_WEBHOOK_SECRET: z.string().min(16),
+  // Comma-separated E.164 numbers that bypass MSG91 entirely and use
+  // MSG91_TEST_OTP. Kept in env so QA can add/remove without a deploy.
+  // Format: '919876543210,919000000001'
+  MSG91_TEST_MOBILES: z.string().default(''),
+  MSG91_TEST_OTP: z
+    .string()
+    .regex(/^\d{6}$/)
+    .default('654321'),
+
   // ── JWT ─────────────────────────────────────────────────────────────────
   JWT_ACCESS_SECRET: secretSchema,
   JWT_REFRESH_SECRET: secretSchema,

@@ -20,6 +20,9 @@ export type AccessTokenClaims = JwtPayload & {
   role: UserRole;
   subRole: SubRole;
   entityId: string;
+  /** Session id — same value as the auth_sessions row's jti. Lets logout
+   *  add THIS token to Redis jwt:deny:{sid} for instant revocation. */
+  sid: string;
 };
 
 export type RefreshTokenClaims = JwtPayload & {

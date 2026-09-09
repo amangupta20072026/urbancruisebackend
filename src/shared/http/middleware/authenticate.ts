@@ -21,6 +21,8 @@ import { AuthError, ForbiddenError } from '../../errors/index.js';
 import { verifyAccessToken } from '../../auth/jwt.js';
 import type { Identity } from '../../types/identity.js';
 import type { UserRole } from '../../rbac/roles.js';
+import { redis } from '../../redis/client.js';
+import { jwtDeny } from '../../redis/keys.js';
 
 const BEARER_PREFIX = 'Bearer ';
 
@@ -30,7 +32,7 @@ const BEARER_PREFIX = 'Bearer ';
  */
 const ENABLED_ROLES = new Set<UserRole>(['customer']);
 
-export const authenticate: RequestHandler = (req, _res, next) => {
+export const authenticate: RequestHandler = async (req, _res, next) => {
   const header = req.header(HEADER_AUTHORIZATION);
   if (!header || !header.startsWith(BEARER_PREFIX)) {
     throw new AuthError('Missing bearer token.', 'AUTH_MISSING_TOKEN');
@@ -39,6 +41,13 @@ export const authenticate: RequestHandler = (req, _res, next) => {
   if (!token) throw new AuthError('Missing bearer token.', 'AUTH_MISSING_TOKEN');
 
   const claims = verifyAccessToken(token);
+
+  // Deny-list check — a logged-out or force-revoked sid gets rejected even
+  // if the JWT is still cryptographically valid.
+  const denied = await redis.get(jwtDeny(claims.sid));
+  if (denied) {
+    throw new AuthError('Session has been revoked.', 'AUTH_SESSION_REVOKED');
+  }
 
   if (!ENABLED_ROLES.has(claims.role)) {
     throw new ForbiddenError(
@@ -53,6 +62,7 @@ export const authenticate: RequestHandler = (req, _res, next) => {
     role: claims.role,
     subRole: claims.subRole,
     entityId: claims.entityId,
+    sessionId: claims.sid,
   };
   req.identity = identity;
   next();

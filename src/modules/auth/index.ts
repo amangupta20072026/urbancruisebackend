@@ -1,10 +1,13 @@
 /**
- * auth module — public API (STUB)
- * TODO(step-2): export mount(): Router that composes this module's routes.
+ * ==============================================================================
+ * auth module — public mount
+ * ==============================================================================
  */
 import { Router } from 'express';
+import routes from './routes.js';
+
 export default {
   mount(): Router {
-    return Router();
+    return routes;
   },
 };

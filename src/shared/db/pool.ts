@@ -67,3 +67,13 @@ export async function closePool(): Promise<void> {
     logger.error({ err }, 'error while closing mysql pool');
   }
 }
+
+export async function verifyConnection(): Promise<void> {
+  try {
+    await ping();
+    logger.info('database connection established');
+  } catch (err) {
+    logger.fatal({ err }, 'database connection failed at startup');
+    throw err;
+  }
+}

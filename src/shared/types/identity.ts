@@ -24,4 +24,10 @@ export type Identity = {
    *   uc       → uc_user_id
    */
   entityId: string;
+  /**
+   * The auth_sessions row (jti) this access token was minted from. Used
+   * by /auth/logout to revoke exactly this session and by the deny-list
+   * middleware to check if this token has been forcibly logged out.
+   */
+  sessionId: string;
 };

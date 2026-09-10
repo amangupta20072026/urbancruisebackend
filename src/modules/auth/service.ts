@@ -74,9 +74,10 @@ import type {
   RequestOtpResponseDto,
   VerifyOtpResponseDto,
   RefreshResponseDto,
+  MeResponseDto,
   DeviceMeta,
 } from './types.js';
-import type { UserRole } from '../../shared/rbac/roles.js';
+import type { UserRole, SubRole } from '../../shared/rbac/roles.js';
 
 /* ==============================================================================
  * PUBLIC — SEND OTP
@@ -488,6 +489,58 @@ export async function logout(p: LogoutParams): Promise<void> {
     redis.srem(sessionsActive(p.identityRole, p.identityEntityId), p.identitySessionId),
     redis.set(jwtDeny(p.identitySessionId), '1', 'EX', ttlToSeconds(ENV.JWT_ACCESS_TTL)),
   ]);
+}
+
+/* ==============================================================================
+ * PUBLIC — GET IDENTITY (/auth/me)
+ * ============================================================================== */
+
+export type GetMeParams = {
+  identityUserId: string;
+  identityRole: UserRole;
+  identitySubRole: SubRole;
+  identityEntityId: string;
+  identitySessionId: string;
+};
+
+/**
+ * Server-authoritative identity for the currently attached session.
+ *
+ * Fires on every mobile cold-start (bootstrap step). Kept intentionally
+ * cheap — one indexed lookup by primary key. No writes on the happy path.
+ *
+ * Orphan handling: if the entity row is gone (admin deletion, GDPR erase,
+ * merged customer) we deny-list the sid so the token is dead on this and
+ * every other instance, then throw AuthError so the client re-auths. The
+ * JWT alone is still cryptographically valid — the deny-list is what
+ * closes that gap in real time.
+ */
+export async function getMe(p: GetMeParams): Promise<MeResponseDto> {
+  const details = await repo.loadIdentityDetails(p.identityRole, p.identityEntityId);
+
+  if (!details) {
+    // Session is valid but its owning row vanished. Revoke and reject.
+    // Reason 'admin' is used because 'orphan' isn't in the auth_sessions
+    // revoked_reason enum; audit intent is the same — a server-side
+    // forced revoke, not a user action.
+    await Promise.all([
+      repo.markSessionRevoked(p.identitySessionId, 'admin').catch(() => {
+        // best-effort — the deny-list is what actually protects the API
+      }),
+      redis.set(jwtDeny(p.identitySessionId), '1', 'EX', ttlToSeconds(ENV.JWT_ACCESS_TTL)),
+      redis.srem(sessionsActive(p.identityRole, p.identityEntityId), p.identitySessionId),
+    ]);
+    throw new AuthError('Your account is no longer available.', AUTH_ERROR.SESSION_ORPHANED);
+  }
+
+  return {
+    userId: p.identityUserId,
+    role: p.identityRole,
+    subRole: p.identitySubRole,
+    entityId: p.identityEntityId,
+    requiresProfileSetup: details.requiresProfileSetup,
+    profile: details.profile,
+  };
 }
 
 /* ==============================================================================

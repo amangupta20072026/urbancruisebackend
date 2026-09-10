@@ -33,6 +33,7 @@ import { errorHandler } from './shared/http/middleware/errorHandler.js';
 // Modules
 import healthModule from './modules/health/index.js';
 import authModule from './modules/auth/index.js';
+import configModule from './modules/config/index.js';
 
 export function buildApp(): Express {
   const app = express();
@@ -64,6 +65,7 @@ export function buildApp(): Express {
   //    Every module exports `mount(): Router`. Base paths are decided here.
   app.use('/', healthModule.mount()); // /health + /ready
   app.use('/api/v1/auth', authModule.mount());
+  app.use('/api/v1/config', configModule.mount()); // /config/app (public — pre-login)
 
   // TODO(step-2): mount business modules
   // app.use('/api/v1/customer',      customerModule.mount());

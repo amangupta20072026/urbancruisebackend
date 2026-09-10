@@ -55,10 +55,10 @@ export const VERIFY_LOCK_DURATION_SECONDS = 15 * 60; // 15 min
  * OTP send rate limits (per mobile). Enforced in Redis before hitting MSG91.
  * ============================================================================== */
 
-/** Max OTP sends per mobile per 10 minutes. */
-export const OTP_SEND_MAX_PER_10M = 3;
-/** Max OTP sends per mobile per day. */
-export const OTP_SEND_MAX_PER_DAY = 10;
+/** Max OTP sends per mobile per 10 minutes. 3*/
+export const OTP_SEND_MAX_PER_10M = 30;
+/** Max OTP sends per mobile per day. 10*/
+export const OTP_SEND_MAX_PER_DAY = 100;
 /** Hard cooldown between two consecutive sends to the same mobile. */
 export const OTP_SEND_MIN_INTERVAL_SECONDS = 30;
 

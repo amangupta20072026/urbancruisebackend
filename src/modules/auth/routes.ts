@@ -8,6 +8,7 @@
  *   POST /auth/refresh       — rotate tokens
  *
  * Protected paths (behind `authenticate`):
+ *   GET  /auth/me            — server-authoritative identity for the session
  *   POST /auth/logout        — revoke current or all sessions
  *
  * NOTE on rate-limit stacking: the global rate limit runs first (in app.ts).
@@ -21,7 +22,7 @@ import { validate } from '../../shared/http/middleware/validate.js';
 import { authenticate } from '../../shared/http/middleware/authenticate.js';
 import { ENV } from '../../config/env.js';
 import { RequestOtpBody, VerifyOtpBody, RefreshBody, LogoutBody } from './schemas.js';
-import { postRequestOtp, postVerifyOtp, postRefresh, postLogout } from './controller.js';
+import { postRequestOtp, postVerifyOtp, postRefresh, postLogout, getMe } from './controller.js';
 
 const router = Router();
 
@@ -58,6 +59,8 @@ router.post('/otp/request', otpLimiter, validate({ body: RequestOtpBody }), post
 router.post('/otp/verify', otpLimiter, validate({ body: VerifyOtpBody }), postVerifyOtp);
 
 router.post('/refresh', validate({ body: RefreshBody }), postRefresh);
+
+router.get('/me', authenticate, getMe);
 
 router.post('/logout', authenticate, validate({ body: LogoutBody }), postLogout);
 

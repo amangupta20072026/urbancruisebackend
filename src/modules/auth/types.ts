@@ -29,6 +29,12 @@ export const AUTH_ERROR = {
   OTP_INVALID: 'otp_invalid',
   OTP_EXPIRED: 'otp_expired',
   SESSION_REVOKED: 'session_revoked',
+  /**
+   * Emitted by /auth/me when the underlying entity (customer/driver/…) row
+   * has been deleted while the session was live. We also revoke the session
+   * so the client can't keep hitting other endpoints with a dead identity.
+   */
+  SESSION_ORPHANED: 'session_orphaned',
   REFRESH_INVALID: 'refresh_invalid',
 } as const;
 export type AuthErrorCode = (typeof AUTH_ERROR)[keyof typeof AUTH_ERROR];
@@ -120,6 +126,21 @@ export type RequestOtpResponseDto = {
 export type RefreshResponseDto = {
   accessToken: string;
   refreshToken: string;
+};
+
+/**
+ * GET /auth/me — server-authoritative identity for the currently attached
+ * session. Same fields as verify's response minus the token pair (the
+ * caller already has them). Used by mobile bootstrap to confirm the
+ * cached session is still trusted before landing the user on Home.
+ */
+export type MeResponseDto = {
+  userId: string;
+  role: UserRole;
+  subRole: SubRole;
+  entityId: string;
+  requiresProfileSetup: boolean;
+  profile: UserProfileDto;
 };
 
 /* ==============================================================================

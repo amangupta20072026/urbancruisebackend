@@ -77,6 +77,23 @@ export async function postLogout(req: Request, res: Response): Promise<Response>
   return noContent(res);
 }
 
+export async function getMe(req: Request, res: Response): Promise<Response> {
+  // authenticate middleware guarantees req.identity is populated.
+  const identity = getIdentity(req);
+
+  const out = await service.getMe({
+    identityUserId: identity.userId,
+    identityRole: identity.role,
+    identitySubRole: identity.subRole,
+    identityEntityId: identity.entityId,
+    identitySessionId: identity.sessionId,
+  });
+
+  // Identity is per-user; never cache at the HTTP layer.
+  res.setHeader('Cache-Control', 'no-store');
+  return ok(res, out);
+}
+
 /* -----------------------------------------------------------------
  * Helpers
  * ----------------------------------------------------------------- */

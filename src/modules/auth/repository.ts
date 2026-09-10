@@ -315,6 +315,97 @@ export async function loadProfile(role: UserRole, entityId: string): Promise<Use
   }
 }
 
+/**
+ * /auth/me loader — returns profile + a fresh `requiresProfileSetup` computed
+ * from the same DB read, or `null` if the entity row no longer exists.
+ *
+ * Why not reuse `loadProfile`?
+ *   - `loadProfile` falls back to a placeholder DTO when the row is missing
+ *     (safe for the login response). For /me the caller must distinguish
+ *     "gone → revoke session" from "here → land on Home", so we need `null`
+ *     as a first-class signal.
+ *   - We also need `requiresProfileSetup` alongside the profile. Rolling
+ *     both into one query per role avoids a second round-trip.
+ */
+export async function loadIdentityDetails(
+  role: UserRole,
+  entityId: string,
+): Promise<{ profile: UserProfileDto; requiresProfileSetup: boolean } | null> {
+  switch (role) {
+    case 'customer':
+      return loadCustomerIdentityDetails(entityId);
+    case 'driver':
+      return loadDriverIdentityDetails(entityId);
+    case 'vendor':
+      return loadVendorIdentityDetails(entityId);
+    case 'uc':
+      return loadUcStaffIdentityDetails(entityId);
+  }
+}
+
+async function loadCustomerIdentityDetails(
+  id: string,
+): Promise<{ profile: UserProfileDto; requiresProfileSetup: boolean } | null> {
+  const [rows] = await pool.execute<CustomerRow[]>(
+    `SELECT id, customerPhone, customerEmail, firstName, lastName, created_at
+       FROM customers WHERE id = ? LIMIT 1`,
+    [id],
+  );
+  if (!rows.length) return null;
+  const r = rows[0]!;
+  const display = joinName(r.firstName, r.lastName) || 'New customer';
+  const phone = normalisePhoneToE164(r.customerPhone);
+  return {
+    profile: {
+      id: String(r.id),
+      displayName: display,
+      email: r.customerEmail ?? null,
+      phoneIndia: phone,
+      phoneGlobal: phone,
+      memberSince: r.created_at.toISOString(),
+    },
+    // Same signal as findCustomerByPhone — firstName gets set by CompleteProfile.
+    requiresProfileSetup: r.firstName === null,
+  };
+}
+
+async function loadDriverIdentityDetails(
+  id: string,
+): Promise<{ profile: UserProfileDto; requiresProfileSetup: boolean } | null> {
+  const profile = await loadDriverProfile(id);
+  // loadDriverProfile returns a placeholder on miss — detect by checking the
+  // real row exists so /me can distinguish "orphan" from "found".
+  const [rows] = await pool.execute<DriverRow[]>(`SELECT id FROM drivers WHERE id = ? LIMIT 1`, [
+    id,
+  ]);
+  if (!rows.length) return null;
+  return { profile, requiresProfileSetup: false };
+}
+
+async function loadVendorIdentityDetails(
+  id: string,
+): Promise<{ profile: UserProfileDto; requiresProfileSetup: boolean } | null> {
+  const profile = await loadVendorProfile(id);
+  const [rows] = await pool.execute<RowDataPacket[]>(
+    `SELECT id FROM vendors WHERE id = ? LIMIT 1`,
+    [id],
+  );
+  if (!rows.length) return null;
+  return { profile, requiresProfileSetup: false };
+}
+
+async function loadUcStaffIdentityDetails(
+  id: string,
+): Promise<{ profile: UserProfileDto; requiresProfileSetup: boolean } | null> {
+  const profile = await loadUcStaffProfile(id);
+  const [rows] = await pool.execute<RowDataPacket[]>(
+    `SELECT id FROM uc_staff WHERE id = ? LIMIT 1`,
+    [id],
+  );
+  if (!rows.length) return null;
+  return { profile, requiresProfileSetup: false };
+}
+
 async function loadCustomerProfile(id: string): Promise<UserProfileDto> {
   const [rows] = await pool.execute<CustomerRow[]>(
     `SELECT id, customerPhone, customerEmail, firstName, lastName, created_at

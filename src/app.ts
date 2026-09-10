@@ -63,15 +63,15 @@ export function buildApp(): Express {
   // 8. Modules
   //    Every module exports `mount(): Router`. Base paths are decided here.
   app.use('/', healthModule.mount()); // /health + /ready
-  app.use('/auth', authModule.mount());
+  app.use('/api/v1/auth', authModule.mount());
 
   // TODO(step-2): mount business modules
-  // app.use('/customer',      customerModule.mount());
-  // app.use('/vendor',        vendorModule.mount());
-  // app.use('/driver',        driverModule.mount());
-  // app.use('/uc',            ucModule.mount());
-  // app.use('/notifications', notificationsModule.mount());
-  // app.use('/support',       supportModule.mount());
+  // app.use('/api/v1/customer',      customerModule.mount());
+  // app.use('/api/v1/vendor',        vendorModule.mount());
+  // app.use('/api/v1/driver',        driverModule.mount());
+  // app.use('/api/v1/uc',            ucModule.mount());
+  // app.use('/api/v1/notifications', notificationsModule.mount());
+  // app.use('/api/v1/support',       supportModule.mount());
 
   // 9. 404
   app.use(notFound);

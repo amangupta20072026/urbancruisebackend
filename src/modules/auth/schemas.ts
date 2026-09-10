@@ -36,7 +36,7 @@ export type RequestOtpBody = z.infer<typeof RequestOtpBody>;
 const DeviceMetaSchema = z.object({
   id: z.string().min(1).max(64),
   name: z.string().min(1).max(150),
-  platform: z.enum(['ios', 'android', 'web']),
+  platform: z.enum(['ios', 'android']),
   appVersion: z.string().min(1).max(30),
 });
 

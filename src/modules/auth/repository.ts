@@ -130,15 +130,16 @@ type CustomerRow = RowDataPacket & {
   customerEmail: string | null;
   firstName: string | null;
   lastName: string | null;
-  status: 'active' | 'suspended' | 'deleted';
-  signup_completed_at: Date | null;
   created_at: Date;
 };
 
 export async function findCustomerByPhone(mobile: string): Promise<ResolvedUser | null> {
   const fmts = candidateFormats(mobile);
+  // NOTE: `customers` table has no `status` or `signup_completed_at` columns.
+  // Status checks are skipped for customers (treated as always 'active').
+  // Profile-setup completeness is inferred from `firstName IS NULL`.
   const [rows] = await pool.execute<CustomerRow[]>(
-    `SELECT id, customerPhone, status, signup_completed_at
+    `SELECT id, customerPhone, firstName
        FROM customers
       WHERE customerPhone IN (?, ?, ?)
       ORDER BY id ASC
@@ -152,18 +153,19 @@ export async function findCustomerByPhone(mobile: string): Promise<ResolvedUser 
     entityId: String(r.id),
     userId: String(r.id),
     subRole: null,
-    status: normStatus(r.status),
-    requiresProfileSetup: r.signup_completed_at === null,
+    status: 'active',
+    requiresProfileSetup: r.firstName === null,
   };
 }
 
 /**
- * Create a shell customer row on first login. Only customerPhone + status
- * are set; every other field is NULL until CompleteProfile fills them in.
+ * Create a shell customer row on first login. Only customerPhone is set;
+ * every other field is NULL until CompleteProfile fills them in.
+ * (No `status` column in this table — customers are always treated as active.)
  */
 export async function createCustomerShell(mobile: string): Promise<ResolvedUser> {
   const [result] = await pool.execute<ResultSetHeader>(
-    `INSERT INTO customers (customerPhone, status) VALUES (?, 'active')`,
+    `INSERT INTO customers (customerPhone) VALUES (?)`,
     [mobile],
   );
   return {
@@ -233,14 +235,15 @@ type DriverRow = RowDataPacket & {
   first_name: string | null;
   last_name: string | null;
   email: string | null;
-  status: 'active' | 'suspended' | 'deleted';
   created_at: Date;
 };
 
 export async function findDriverByPhone(mobile: string): Promise<ResolvedUser | null> {
   const fmts = candidateFormats(mobile);
+  // NOTE: `drivers` table has no `status` column. Status checks are skipped
+  // for drivers (treated as always 'active').
   const [rows] = await pool.execute<DriverRow[]>(
-    `SELECT id, phone, status
+    `SELECT id, phone
        FROM drivers
       WHERE phone IN (?, ?, ?)
       LIMIT 1`,
@@ -253,7 +256,7 @@ export async function findDriverByPhone(mobile: string): Promise<ResolvedUser | 
     entityId: String(r.id),
     userId: String(r.id),
     subRole: null,
-    status: normStatus(r.status),
+    status: 'active',
     requiresProfileSetup: false,
   };
 }

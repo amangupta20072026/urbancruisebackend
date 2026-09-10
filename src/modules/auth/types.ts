@@ -75,7 +75,7 @@ export type AuthSessionRow = {
   previous_jti: string | null;
   device_id: string | null;
   device_name: string | null;
-  platform: 'ios' | 'android' | 'web' | null;
+  platform: 'ios' | 'android' | null;
   app_version: string | null;
   ip: Buffer | null;
   user_agent: string | null;
@@ -129,6 +129,6 @@ export type RefreshResponseDto = {
 export type DeviceMeta = {
   id: string;
   name: string;
-  platform: 'ios' | 'android' | 'web';
+  platform: 'ios' | 'android';
   appVersion: string;
 };

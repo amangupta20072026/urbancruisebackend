@@ -89,7 +89,7 @@ function clientIp(req: Request): string | null {
 
 function extractDevice(
   req: Request,
-): { id: string; name: string; platform: 'ios' | 'android' | 'web'; appVersion: string } | null {
+): { id: string; name: string; platform: 'ios' | 'android'; appVersion: string } | null {
   type MaybeDevice = { id?: unknown; name?: unknown; platform?: unknown; appVersion?: unknown };
   const b = req.body as { device?: MaybeDevice };
   const d = b?.device;
@@ -102,6 +102,6 @@ function extractDevice(
   ) {
     return null;
   }
-  if (d.platform !== 'ios' && d.platform !== 'android' && d.platform !== 'web') return null;
+  if (d.platform !== 'ios' && d.platform !== 'android') return null;
   return { id: d.id, name: d.name, platform: d.platform, appVersion: d.appVersion };
 }

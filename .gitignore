@@ -6,6 +6,7 @@ jspm_packages/
 logs/
 .husky/_
 .well-known/
+firebase-service-account.json
 
 # ===================================
 # Build output

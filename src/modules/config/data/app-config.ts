@@ -59,8 +59,8 @@ export const FEATURE_FLAGS = {
  * client can prompt users to re-accept when it changes.
  */
 export const SUPPORT = {
-  phone: '+911234567890', // TODO(config)
-  whatsapp: '+911234567890', // TODO(config)
+  phone: '+919355992138', // TODO(config)
+  whatsapp: '+919355992138', // TODO(config)
   email: 'support@urbancruise.in', // TODO(config)
   helpUrl: 'https://urbancruise.in/help', // TODO(config)
 } as const;

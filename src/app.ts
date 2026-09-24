@@ -35,6 +35,7 @@ import healthModule from './modules/health/index.js';
 import authModule from './modules/auth/index.js';
 import configModule from './modules/config/index.js';
 import customerModule from './modules/customer/index.js';
+import notificationsModule from './modules/notifications/index.js';
 
 export function buildApp(): Express {
   const app = express();
@@ -68,12 +69,12 @@ export function buildApp(): Express {
   app.use('/api/v1/auth', authModule.mount());
   app.use('/api/v1/config', configModule.mount()); // /config/app (public — pre-login)
   app.use('/api/v1/customer', customerModule.mount()); // receipts + (step-2) full customer API
+  app.use('/api/v1/notifications', notificationsModule.mount());
 
   // TODO(step-2): mount remaining business modules
   // app.use('/api/v1/vendor',        vendorModule.mount());
   // app.use('/api/v1/driver',        driverModule.mount());
   // app.use('/api/v1/uc',            ucModule.mount());
-  // app.use('/api/v1/notifications', notificationsModule.mount());
   // app.use('/api/v1/support',       supportModule.mount());
 
   // 9. 404

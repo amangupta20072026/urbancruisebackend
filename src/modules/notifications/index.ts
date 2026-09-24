@@ -1,10 +1,15 @@
 /**
- * notifications module — public API (STUB)
- * TODO(step-2): export mount(): Router that composes this module's routes.
+ * notifications module — public API
+ * Exposes mount() for app.ts and sendNotification() for other modules
+ * that want to deliver a push without knowing FCM internals.
  */
 import { Router } from 'express';
+import router from './routes.js';
+
+export { sendNotification } from './service.js';
+
 export default {
   mount(): Router {
-    return Router();
+    return router;
   },
 };

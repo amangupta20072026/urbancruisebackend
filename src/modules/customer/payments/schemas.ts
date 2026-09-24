@@ -1,6 +1,8 @@
 /**
- * customer.payments — Zod schemas (STUB)
- * TODO(step-2): one schema per endpoint (body / params / query).
- * z.infer<> gives you request typing for free in the controller.
+ * customer.payments — Zod schemas
  */
-export {};
+import { z } from 'zod';
+
+export const paymentIdParamSchema = z.object({
+  id: z.string().min(1, 'Payment ID is required'),
+});

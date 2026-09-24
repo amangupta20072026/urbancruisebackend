@@ -11,7 +11,8 @@
     "esModuleInterop": true,
     "target": "esnext",
     "lib": ["esnext"],
-    "types": ["node"],
+    "types": ["node", "react"],
+    "jsx": "react-jsx",
 
     // Other Outputs
     "sourceMap": true,

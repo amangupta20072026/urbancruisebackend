@@ -12,11 +12,20 @@
  *   - referrals
  */
 import { Router } from 'express';
+import paymentsRouter from './payments/routes.js';
+
 export default {
   mount(): Router {
     const r = Router();
-    // TODO(step-2): mount sub-module routers here, e.g.
+    // Payments: GET /api/v1/customer/payments/:id/receipt
+    r.use('/payments', paymentsRouter);
+    // TODO(step-2): mount remaining sub-module routers:
+    //   r.use('/enquiries', enquiriesRoutes);
+    //   r.use('/quotations', quotationsRoutes);
     //   r.use('/bookings', bookingsRoutes);
+    //   r.use('/trips', tripsRoutes);
+    //   r.use('/feedback', feedbackRoutes);
+    //   r.use('/referrals', referralsRoutes);
     return r;
   },
 };

@@ -54,8 +54,16 @@ export const otpVerifyFail = (mobile: string): string => `otp:verify:fail:${mobi
  * Idempotency
  * ----------------------------------------------------------------- */
 
-/** Response snapshot for POST /auth/otp/request. Stored as JSON string. */
-export const idempotencySnapshot = (key: string): string => `idem:${key}`;
+/** Response snapshot for POST /auth/otp/request. Value is a JSON blob:
+ *  { fp: sha256('<mobile>|<role>'), response: RequestOtpResponseDto }.
+ *  The fingerprint binding rejects replays of the same key with a different
+ *  (mobile, role) — see the top-of-file comment in auth/service.ts.
+ *
+ *  Version prefix `v2:` isolates this new format from any pre-existing
+ *  legacy snapshots (which stored the response directly, without the fp
+ *  wrapper). Legacy ones expire naturally within IDEMPOTENCY_TTL_SECONDS
+ *  (24h) after this deploy — no double-parse risk. */
+export const idempotencySnapshot = (key: string): string => `idem:v2:${key}`;
 
 /* -----------------------------------------------------------------
  * Mobile registry cache (write-through of mysql mobile_registry)

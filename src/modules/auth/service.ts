@@ -6,7 +6,11 @@
  * here is pure business logic — no Express types leak in.
  *
  * ORDER-OF-CHECKS matters (send flow):
- *   1. Idempotency snapshot lookup    (cheap, avoids re-sending on retry)
+ *   1. Idempotency snapshot lookup    (cheap, avoids re-sending on retry —
+ *                                       fingerprinted by sha256(mobile|role),
+ *                                       so the same key reused with a
+ *                                       different payload returns 409 rather
+ *                                       than replaying someone else's response)
  *   2. Mobile registry hard blocks    (admin, lock, captcha)
  *   3. For non-customer roles: SILENT-DROP if account not provisioned or
  *      suspended. Response DTO is IDENTICAL to a real send so an attacker
@@ -112,12 +116,40 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
   const mobile = normalizeMobile(p.phone, p.countryCode);
   const isTest = TEST_MOBILES.has(mobile);
 
-  // 1. Idempotency snapshot — replay identical response for 24h
+  // 1. Idempotency snapshot — replay identical response for 24h.
+  //
+  //    A snapshot is bound to the SAME (mobile, role) it was originally
+  //    created for. Re-using the same idempotency key with a different
+  //    payload is a client bug OR an attempt to replay someone else's key
+  //    (harvested from logs, shared client, network sniffing, etc.) — either
+  //    way we return 409 IDEMPOTENCY_KEY_MISMATCH rather than silently
+  //    serving the previous caller's cached response. This matches Stripe /
+  //    AWS idempotency semantics.
+  //
+  //    Fingerprint is sha256('<mobile>|<role>') — no PII in the snapshot
+  //    itself, and a stolen key alone can't be used to enumerate mobiles.
   if (p.idempotencyKey) {
     const snap = await redis.get(idempotencySnapshot(p.idempotencyKey));
     if (snap) {
+      const parsed = JSON.parse(snap) as { fp: string; response: RequestOtpResponseDto };
+      const expectedFp = sha256(`${mobile}|${p.role}`);
+      if (parsed.fp !== expectedFp) {
+        logger.warn(
+          {
+            alarm: 'idempotency_key_mismatch',
+            key: p.idempotencyKey,
+            role: p.role,
+            ip: p.ip,
+          },
+          'otp send: idempotency key reused with a different (mobile, role)',
+        );
+        throw new ConflictError(
+          'Idempotency key was already used for a different request.',
+          'IDEMPOTENCY_KEY_MISMATCH',
+        );
+      }
       logger.info({ key: p.idempotencyKey }, 'otp send: idempotent replay');
-      return JSON.parse(snap) as RequestOtpResponseDto;
+      return parsed.response;
     }
   }
 
@@ -291,11 +323,13 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
     testMode: isTest,
   };
 
-  // 9. Idempotency snapshot
+  // 9. Idempotency snapshot — store the response plus a fingerprint bound
+  //    to (mobile, role). Step 1's lookup rejects replays that don't match.
   if (p.idempotencyKey) {
+    const fp = sha256(`${mobile}|${p.role}`);
     await redis.set(
       idempotencySnapshot(p.idempotencyKey),
-      JSON.stringify(response),
+      JSON.stringify({ fp, response }),
       'EX',
       IDEMPOTENCY_TTL_SECONDS,
     );

@@ -713,3 +713,85 @@ export async function insertLoginEvent(e: LoginEventInsert): Promise<void> {
     ],
   );
 }
+
+/* ==============================================================================
+ * DLR — delivery-status updates from MSG91 webhook
+ *
+ * Design: idempotent one-shot transition from 'pending' → terminal state.
+ * We only ever move a row OUT of 'pending' — once a row has a terminal
+ * delivery_status ('delivered'|'failed'|'rejected'|'user_blocked'), we never
+ * downgrade it, even if a duplicate/late DLR arrives.
+ *
+ * Correlation key: msg91_request_id, populated by the send path when MSG91
+ * accepted the SMS (see auth service). A single MSG91 request can map to
+ * multiple otp_events rows only if you re-audit — in practice it's 1:1.
+ * ============================================================================== */
+
+/**
+ * Bucket MSG91's DLR into the delivery_status enum used by otp_events.
+ * Kept in the repository (not the provider adapter) because it is a schema
+ * concern — the enum lives in the DB.
+ */
+function dlrToDeliveryStatus(
+  dlr: 'delivered' | 'failed' | 'rejected',
+  description: string | null,
+): 'delivered' | 'failed' | 'undeliverable' | 'user_blocked' {
+  if (dlr === 'delivered') return 'delivered';
+  if (dlr === 'rejected') {
+    // DND rejections are the recipient blocking us. Anything else rejected
+    // is a template / DLT / permanent policy issue — treat as undeliverable.
+    if (description && /dnd|blocked/i.test(description)) return 'user_blocked';
+    return 'undeliverable';
+  }
+  // 'failed' — carrier-reported failure. Distinguish permanent from
+  // transient by MSG91's own free-text description so operators looking at
+  // the row later can tell why. Absent-subscriber-permanent, ported-out,
+  // teleservice-not-provisioned, call-barred and inbox-full are permanent.
+  if (
+    description &&
+    /permanent|ported|teleservice|barred|memexcd|memory|not\s*provisioned|invalid/i.test(
+      description,
+    )
+  ) {
+    return 'undeliverable';
+  }
+  return 'failed';
+}
+
+export type DlrUpdate = {
+  msg91RequestId: string;
+  dlr: 'delivered' | 'failed' | 'rejected';
+  description: string | null;
+  providerStatusCode: number | null;
+};
+
+/**
+ * Apply one DLR to its otp_events row. Returns the number of rows updated
+ * (0 or 1 — 0 means either the msg91_request_id is unknown, or the row is
+ * already in a terminal state and we correctly refused to downgrade).
+ *
+ * Idempotency: the WHERE clause pins to delivery_status = 'pending', so
+ * re-delivering the same DLR is a no-op. Safe to retry.
+ *
+ * Also refreshes msg91_error_code / msg91_error_message on failure DLRs so
+ * the audit row carries the carrier's stated reason without a second lookup.
+ */
+export async function applyDlr(update: DlrUpdate): Promise<number> {
+  const newStatus = dlrToDeliveryStatus(update.dlr, update.description);
+  const isFailure = newStatus !== 'delivered';
+  const [result] = await pool.execute<ResultSetHeader>(
+    `UPDATE otp_events
+        SET delivery_status    = ?,
+            msg91_error_code   = COALESCE(msg91_error_code,   ?),
+            msg91_error_message = COALESCE(msg91_error_message, ?)
+      WHERE msg91_request_id = ?
+        AND delivery_status  = 'pending'`,
+    [
+      newStatus,
+      isFailure && update.providerStatusCode !== null ? String(update.providerStatusCode) : null,
+      isFailure ? update.description : null,
+      update.msg91RequestId,
+    ],
+  );
+  return result.affectedRows;
+}

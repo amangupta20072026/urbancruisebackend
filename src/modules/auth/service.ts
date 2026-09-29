@@ -8,11 +8,17 @@
  * ORDER-OF-CHECKS matters (send flow):
  *   1. Idempotency snapshot lookup    (cheap, avoids re-sending on retry)
  *   2. Mobile registry hard blocks    (admin, lock, captcha)
- *   3. For non-customer roles: pre-check account exists (avoid burning MSG91
- *      credit on a number that will 403 at verify anyway)
- *   4. Per-mobile rate limits          (Redis counters)
- *   5. Generate OTP, hash, store in Redis session
- *   6. MSG91 dispatch (SMS via Flow API v5)
+ *   3. For non-customer roles: SILENT-DROP if account not provisioned or
+ *      suspended. Response DTO is IDENTICAL to a real send so an attacker
+ *      probing the endpoint cannot enumerate which numbers are registered
+ *      as vendor/driver/uc. See "SILENT DROP" comment in sendOtp for the
+ *      full rationale.
+ *   4. Per-mobile rate limits          (Redis counters — apply to silent-
+ *                                       drops too so probes still burn quota)
+ *   5. Generate OTP, hash, store in Redis session (silent-drop uses an
+ *                                       unguessable random hash so verify
+ *                                       never matches)
+ *   6. MSG91 dispatch (SMS via Flow API v5) — SKIPPED for silent-drops
  *   7. Snapshot response for idempotency
  *   8. Insert otp_events row
  *
@@ -28,7 +34,7 @@
  *   9. Insert login_events row
  * ==============================================================================
  */
-import { randomInt } from 'node:crypto';
+import { randomInt, randomBytes } from 'node:crypto';
 import { redis } from '../../shared/redis/client.js';
 import {
   otpSession,
@@ -121,34 +127,59 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
     );
   }
 
-  // 3. Non-customer roles must be pre-provisioned. Fail-fast so we don't burn
-  //    an OTP credit on a number that will be rejected at verify anyway.
+  // 3. Non-customer role provisioning / status check — SILENT DROP on miss.
+  //
+  //    Previous behaviour threw ForbiddenError with distinct codes
+  //    (ACCOUNT_NOT_PROVISIONED, ACCOUNT_SUSPENDED). That leaked a boolean
+  //    ("is this number a registered vendor?") to any unauthenticated
+  //    caller. Attackers used it to enumerate who works for the platform,
+  //    then targeted them by other channels.
+  //
+  //    New behaviour: the endpoint returns the SAME RequestOtpResponseDto
+  //    whether the number is provisioned, unprovisioned, or suspended.
+  //    We do NOT dispatch MSG91 (saves the credit), we DO create a Redis
+  //    session with an unguessable random hash (so hitting /verify yields
+  //    the same OTP_INVALID as a wrong OTP), and we still count the
+  //    request against the per-mobile rate-limit quota (attacker can't
+  //    bypass limits by probing unprovisioned numbers).
+  //
+  //    Trade-off: a legit unprovisioned/suspended user gets no clear
+  //    signal from the send endpoint. They discover the state at verify
+  //    time (OTP_INVALID or, if they ever provided the right OTP, the
+  //    verify-time ACCOUNT_SUSPENDED branch). Support flow handles this.
+  //
+  //    KNOWN RESIDUAL SIGNAL — TIMING: silent-drops skip the MSG91 HTTP
+  //    call so they return ~500 ms faster than real sends. Per-mobile
+  //    rate limits keep this from being practically exploitable at scale.
+  //    If the timing side-channel becomes a concern later, move MSG91
+  //    dispatch onto a background job so both paths return in constant
+  //    time.
+  let silentDrop = false;
+  let silentDropReason: 'not_provisioned' | 'suspended' | null = null;
   if (p.role !== 'customer') {
     const exists = await lookupUser(p.role, mobile);
     if (!exists) {
-      await audit({
-        mobile,
-        role: p.role,
-        event: 'account_not_provisioned',
-        ip: p.ip,
-      });
-      throw new ForbiddenError(
-        `No ${p.role} account exists for this number.`,
-        AUTH_ERROR.ACCOUNT_NOT_PROVISIONED,
-      );
-    }
-    if (exists.status === 'suspended' || exists.status === 'deleted') {
-      throw new ForbiddenError('This account has been suspended.', AUTH_ERROR.ACCOUNT_SUSPENDED);
+      silentDrop = true;
+      silentDropReason = 'not_provisioned';
+    } else if (exists.status === 'suspended' || exists.status === 'deleted') {
+      silentDrop = true;
+      silentDropReason = 'suspended';
     }
   }
 
   // 4. Per-mobile rate limits
   await enforceSendRateLimits(mobile, p.ip);
 
-  // 5. Generate OTP + Redis session
+  // 5. Generate OTP + Redis session.
+  //    For silent-drops we still create a session with the SAME shape as a
+  //    real one, but the stored hash is 32 random bytes hex-encoded — same
+  //    length as sha256 (so an attacker who somehow reads Redis can't tell
+  //    the difference) but cryptographically impossible to match with any
+  //    submitted OTP. So /verify returns the same OTP_INVALID for silent-
+  //    drop sessions as for wrong-OTP submissions on real sessions.
   const requestId = newId();
   const otp = isTest ? ENV.MSG91_TEST_OTP : generateOtp();
-  const otpHash = sha256(otp);
+  const otpHash = silentDrop ? randomBytes(32).toString('hex') : sha256(otp);
 
   const session: OtpSession = {
     requestId,
@@ -163,11 +194,26 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
 
   await redis.set(otpSession(requestId), JSON.stringify(session), 'EX', OTP_SESSION_TTL_SECONDS);
 
-  // 6. Dispatch — test mobiles skip MSG91 entirely; everyone else gets SMS.
+  // 6. Dispatch — three paths:
+  //      (a) silent-drop: skip MSG91 entirely; log an alarm so ops can
+  //          monitor probable enumeration probes.
+  //      (b) test mobile: skip MSG91 (known QA numbers).
+  //      (c) real: dispatch via MSG91 Flow API.
   let providerRequestId: string | null = null;
   let attemptNumber = 1;
 
-  if (isTest) {
+  if (silentDrop) {
+    logger.warn(
+      {
+        alarm: 'otp_silent_drop',
+        reason: silentDropReason,
+        role: p.role,
+        mobile: maskMobile(mobile),
+        ip: p.ip,
+      },
+      'otp send: silent drop (enumeration protection) — no SMS sent',
+    );
+  } else if (isTest) {
     logger.warn({ mobile: maskMobile(mobile) }, 'otp send: TEST MODE (no real SMS)');
   } else {
     const dispatch = await dispatchOtp(mobile, otp);
@@ -206,17 +252,23 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
     }
   }
 
-  // 7. Insert audit event
+  // 7. Insert audit event.
+  //    - Real success        → event='send_succeeded'
+  //    - Silent-drop (either reason) → event='account_not_provisioned'
+  //      (reuses the existing enum value to avoid a DB migration; the
+  //      specific reason — not_provisioned vs suspended — is written to
+  //      msg91_error_message so ops queries can differentiate).
   await audit({
     mobile,
     role: p.role,
-    event: 'send_succeeded',
+    event: silentDrop ? 'account_not_provisioned' : 'send_succeeded',
     channel: isTest ? 'test' : 'sms',
     providerRequestId,
     attemptNumber,
     idempotencyKey: p.idempotencyKey,
     isTest,
     ip: p.ip,
+    ...(silentDrop && silentDropReason ? { msg: silentDropReason } : {}),
   });
 
   // 8. Update rate-limit counters (only on success)

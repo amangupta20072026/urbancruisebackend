@@ -61,8 +61,13 @@ const schema = z.object({
   // expose the OTP as the ##OTP## variable. Sender IDs are 3–11 alpha chars.
   MSG91_SMS_SENDER_ID: z.string().min(3).max(11),
   MSG91_SMS_TEMPLATE_ID: z.string().min(1),
-  // HMAC secret used to verify MSG91 delivery-webhook signatures.
-  MSG91_WEBHOOK_SECRET: z.string().min(16),
+  // Shared secret embedded in the MSG91 DLR webhook URL path
+  // (/webhooks/msg91/<secret>/delivery). MSG91 does not sign DLR pushes,
+  // so possession of the URL authenticates the caller. Rotate by
+  // generating a new value and updating the URL in the MSG91 dashboard.
+  // 32 chars minimum ≈ 190 bits of entropy — infeasible to brute force
+  // even at MSG91's-portal rate.
+  MSG91_WEBHOOK_SECRET: z.string().min(32),
   // Comma-separated E.164 numbers that bypass MSG91 entirely and use
   // MSG91_TEST_OTP. Kept in env so QA can add/remove without a deploy.
   // Format: '919876543210,919000000001'

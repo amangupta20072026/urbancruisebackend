@@ -32,7 +32,7 @@ import { errorHandler } from './shared/http/middleware/errorHandler.js';
 
 // Modules
 import healthModule from './modules/health/index.js';
-import authModule from './modules/auth/index.js';
+import authModule, { mountWebhooks as authWebhooks } from './modules/auth/index.js';
 import configModule from './modules/config/index.js';
 import customerModule from './modules/customer/index.js';
 import notificationsModule from './modules/notifications/index.js';
@@ -60,7 +60,15 @@ export function buildApp(): Express {
   app.use(express.json({ limit: JSON_BODY_LIMIT }));
   app.use(express.urlencoded({ extended: true, limit: URLENCODED_BODY_LIMIT }));
 
-  // 7. Global rate limit (per-route limiters can layer on top)
+  // 7a. Provider webhooks — mounted BEFORE the global rate limit because
+  //     MSG91 delivery reports arrive in bursts (one per SMS the platform
+  //     just handled) and getting throttled here means losing delivery
+  //     visibility. Authentication for these routes is the URL-embedded
+  //     shared secret checked inside each webhook handler; no session
+  //     applies.
+  app.use('/webhooks', authWebhooks());
+
+  // 7b. Global rate limit (per-route limiters can layer on top)
   app.use(globalRateLimit);
 
   // 8. Modules

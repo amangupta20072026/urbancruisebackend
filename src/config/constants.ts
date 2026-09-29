@@ -63,6 +63,39 @@ export const OTP_SEND_MAX_PER_DAY = 100;
 export const OTP_SEND_MIN_INTERVAL_SECONDS = 30;
 
 /* ==============================================================================
+ * SMS-pumping defenses — subnet + number-prefix hourly caps
+ * ==============================================================================
+ * These layer on top of the per-mobile limits above. Per-mobile caps do not
+ * defend against pumping because the attack rotates target numbers — each
+ * probe hits a fresh per-mobile bucket. The two limits below catch the
+ * shared attributes of pumping traffic:
+ *
+ *   IP-block limit — attackers behind a small IP range (VPN endpoints,
+ *   botnet subnets, rented server ranges) share the /24 (or /64 for IPv6).
+ *   Legitimate shared traffic (corporate NAT, coworking space, campus)
+ *   also shares subnets; tune upward if such traffic trips it in your logs.
+ *
+ *   Number-prefix limit — SMS pumping farms register blocks of numbers on
+ *   a single mobile operator, which cluster on a narrow prefix range
+ *   (~10k numbers per 5-char prefix in India). Tune upward if your largest
+ *   legitimate operator cluster's peak hour exceeds this.
+ *
+ * Both are HOURLY windows in Redis. Test-mobile paths bypass both — QA
+ * tooling should never trip anti-abuse limits.
+ * ============================================================================== */
+
+/** Max OTP sends per IP subnet (IPv4 /24, IPv6 /64) per hour. */
+export const OTP_SEND_MAX_PER_IPBLOCK_PER_HOUR = 100;
+
+/** Max OTP sends per number prefix per hour. */
+export const OTP_SEND_MAX_PER_PREFIX_PER_HOUR = 500;
+
+/** How many leading characters of the mobile (including country code) form
+ *  the prefix bucket. 5 covers country code + 3-digit operator prefix,
+ *  e.g. '91981' groups all Airtel Delhi-ish numbers starting +91981xxxxxxx. */
+export const OTP_PREFIX_LENGTH = 5;
+
+/* ==============================================================================
  * MSG91 provider reliability — retry + circuit breaker
  * ============================================================================== */
 

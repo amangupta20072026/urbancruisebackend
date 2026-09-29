@@ -37,6 +37,16 @@ export const otpLastSent = (mobile: string): string => `otp:lastsent:${mobile}`;
 /** Rate-limit per source IP (per hour). */
 export const otpRateIpHour = (ip: string): string => `otp:rate:ip:${ip}:1h`;
 
+/** Rate-limit per IP subnet (IPv4 /24, IPv6 /64) per hour. Catches SMS
+ *  pumping traffic that clusters in a small IP range — bypasses the
+ *  per-mobile buckets by rotating target numbers, but shares the subnet. */
+export const otpRateIpBlock = (ipBlock: string): string => `otp:rate:ipblock:${ipBlock}:1h`;
+
+/** Rate-limit per mobile-number prefix (per hour). Catches SMS pumping
+ *  farms that hold blocks of numbers on a single operator's pool, which
+ *  cluster on a narrow prefix range. */
+export const otpRateNumberPrefix = (prefix: string): string => `otp:rate:prefix:${prefix}:1h`;
+
 /** Consecutive verify-failure count for a mobile. */
 export const otpVerifyFail = (mobile: string): string => `otp:verify:fail:${mobile}`;
 

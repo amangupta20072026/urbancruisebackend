@@ -15,6 +15,10 @@
  *      full rationale.
  *   4. Per-mobile rate limits          (Redis counters — apply to silent-
  *                                       drops too so probes still burn quota)
+ *                                      + SMS-pumping caps: per-IP-block
+ *                                       (IPv4 /24, IPv6 /64) and per-number-
+ *                                       prefix (5-char) hourly windows.
+ *                                       Skipped for test mobiles only.
  *   5. Generate OTP, hash, store in Redis session (silent-drop uses an
  *                                       unguessable random hash so verify
  *                                       never matches)
@@ -35,11 +39,14 @@
  * ==============================================================================
  */
 import { randomInt, randomBytes } from 'node:crypto';
+import { isIPv4, isIPv6 } from 'node:net';
 import { redis } from '../../shared/redis/client.js';
 import {
   otpSession,
   otpRateMobile10m,
   otpRateMobileDay,
+  otpRateIpBlock,
+  otpRateNumberPrefix,
   otpLastSent,
   otpVerifyFail,
   idempotencySnapshot,
@@ -53,6 +60,9 @@ import {
   OTP_SEND_MAX_PER_10M,
   OTP_SEND_MAX_PER_DAY,
   OTP_SEND_MIN_INTERVAL_SECONDS,
+  OTP_SEND_MAX_PER_IPBLOCK_PER_HOUR,
+  OTP_SEND_MAX_PER_PREFIX_PER_HOUR,
+  OTP_PREFIX_LENGTH,
   IDEMPOTENCY_TTL_SECONDS,
   VERIFY_FAIL_WINDOW_SECONDS,
   VERIFY_FAIL_LOCK_THRESHOLD,
@@ -167,8 +177,8 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
     }
   }
 
-  // 4. Per-mobile rate limits
-  await enforceSendRateLimits(mobile, p.ip);
+  // 4. Per-mobile rate limits + anti-pumping (subnet + prefix) caps
+  await enforceSendRateLimits(mobile, p.ip, isTest);
 
   // 5. Generate OTP + Redis session.
   //    For silent-drops we still create a session with the SAME shape as a
@@ -272,7 +282,7 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
   });
 
   // 8. Update rate-limit counters (only on success)
-  await incrementSendCounters(mobile);
+  await incrementSendCounters(mobile, p.ip, isTest);
 
   const response: RequestOtpResponseDto = {
     requestId,
@@ -646,7 +656,11 @@ async function lookupUser(role: UserRole, mobile: string): Promise<ResolvedUser 
   }
 }
 
-async function enforceSendRateLimits(mobile: string, _ip: string | null): Promise<void> {
+async function enforceSendRateLimits(
+  mobile: string,
+  ip: string | null,
+  isTest: boolean,
+): Promise<void> {
   // Cooldown between sends
   const last = await redis.get(otpLastSent(mobile));
   if (last) {
@@ -680,11 +694,78 @@ async function enforceSendRateLimits(mobile: string, _ip: string | null): Promis
       86_400,
     );
   }
+
+  /* --------------------------------------------------------------
+   * SMS-pumping defenses (subnet + number-prefix).
+   *
+   * Skipped for test-mobile paths — QA tooling must never be able
+   * to trip anti-abuse limits and cause a test suite to silently
+   * degrade to 429s.
+   *
+   * These limits catch the shared attributes of pumping traffic
+   * that per-mobile counters miss (attacker rotates the target
+   * number, hitting a fresh per-mobile bucket every time).
+   *
+   * User-facing error messages here are DELIBERATELY generic —
+   * "your network" / "this number range" — so we don't leak the
+   * bucket identity to a probing attacker.
+   * -------------------------------------------------------------- */
+  if (!isTest) {
+    // Per-IP-block (IPv4 /24, IPv6 /64) hourly cap. Skipped only when we
+    // couldn't parse a source IP at all (rare — trust-proxy is set).
+    const ipKey = bucketIp(ip);
+    if (ipKey) {
+      const raw = await redis.get(otpRateIpBlock(ipKey));
+      const count = raw ? Number(raw) : 0;
+      if (count >= OTP_SEND_MAX_PER_IPBLOCK_PER_HOUR) {
+        logger.warn(
+          {
+            alarm: 'otp_ip_block_limit',
+            ipBlock: ipKey,
+            count,
+            threshold: OTP_SEND_MAX_PER_IPBLOCK_PER_HOUR,
+          },
+          'otp send: per-IP-block hourly cap tripped — possible SMS pumping from this subnet',
+        );
+        throw new RateLimitErrorWith(
+          'Too many requests from your network. Please try again later.',
+          'send_limit_ip_block',
+          3600,
+        );
+      }
+    }
+
+    // Per-number-prefix hourly cap. Always applicable — mobile is always
+    // present at this point (validated upstream by Zod).
+    const prefixKey = bucketPrefix(mobile);
+    const raw = await redis.get(otpRateNumberPrefix(prefixKey));
+    const count = raw ? Number(raw) : 0;
+    if (count >= OTP_SEND_MAX_PER_PREFIX_PER_HOUR) {
+      logger.warn(
+        {
+          alarm: 'otp_prefix_limit',
+          prefix: prefixKey,
+          count,
+          threshold: OTP_SEND_MAX_PER_PREFIX_PER_HOUR,
+        },
+        'otp send: per-number-prefix hourly cap tripped — possible SMS pumping targeting this range',
+      );
+      throw new RateLimitErrorWith(
+        'Too many requests for this number range. Please try again later.',
+        'send_limit_number_prefix',
+        3600,
+      );
+    }
+  }
 }
 
-async function incrementSendCounters(mobile: string): Promise<void> {
+async function incrementSendCounters(
+  mobile: string,
+  ip: string | null,
+  isTest: boolean,
+): Promise<void> {
   const now = String(Date.now());
-  await Promise.all([
+  const jobs: Promise<unknown>[] = [
     redis.set(otpLastSent(mobile), now, 'EX', OTP_SEND_MIN_INTERVAL_SECONDS + 5),
     (async () => {
       const k = otpRateMobile10m(mobile);
@@ -696,7 +777,93 @@ async function incrementSendCounters(mobile: string): Promise<void> {
       const n = await redis.incr(k);
       if (n === 1) await redis.expire(k, 86_400);
     })(),
-  ]);
+  ];
+
+  // Anti-pumping counters — bump alongside the per-mobile ones so probes
+  // burn the subnet + prefix quotas even when they rotate target numbers.
+  // Silent-drop requests bump these too (they look identical to a real
+  // send at the anti-abuse layer); test-mobile requests do not.
+  if (!isTest) {
+    const ipKey = bucketIp(ip);
+    if (ipKey) {
+      jobs.push(
+        (async () => {
+          const k = otpRateIpBlock(ipKey);
+          const n = await redis.incr(k);
+          if (n === 1) await redis.expire(k, 3600);
+        })(),
+      );
+    }
+    const prefixKey = bucketPrefix(mobile);
+    jobs.push(
+      (async () => {
+        const k = otpRateNumberPrefix(prefixKey);
+        const n = await redis.incr(k);
+        if (n === 1) await redis.expire(k, 3600);
+      })(),
+    );
+  }
+
+  await Promise.all(jobs);
+}
+
+/* -----------------------------------------------------------------
+ * Anti-pumping bucketing helpers
+ * -----------------------------------------------------------------
+ * bucketIp:     source-IP → subnet key
+ *                 IPv4 → /24 ("v4:a.b.c")
+ *                 IPv6 → /64 ("v6:xxxx:xxxx:xxxx:xxxx")
+ *               Returns null when the IP is missing or unparseable —
+ *               caller must skip the check (fail-open).
+ *
+ * bucketPrefix: mobile → first-N-chars prefix bucket. Groups numbers
+ *               by country code + operator-level prefix so pumping
+ *               through one operator's number pool hits one bucket.
+ * ----------------------------------------------------------------- */
+
+function bucketIp(ip: string | null): string | null {
+  if (!ip) return null;
+  // Express hands us IPv4-mapped IPv6 (::ffff:x.x.x.x) on dual-stack
+  // sockets — unwrap so the IPv4 branch handles it.
+  const stripped = ip.replace(/^::ffff:/, '');
+  if (isIPv4(stripped)) {
+    const [a, b, c] = stripped.split('.');
+    return `v4:${a}.${b}.${c}`;
+  }
+  if (isIPv6(ip)) {
+    return `v6:${ipv6First64(ip)}`;
+  }
+  return null;
+}
+
+/**
+ * Take the first four hextets of an IPv6 address (the /64 network
+ * portion, per RFC 6177 which sets /64 as the standard end-site
+ * allocation). Handles `::` compression by expanding to eight groups
+ * first, then slicing. Padded to four-hex per hextet so equivalent
+ * addresses hash to the same key regardless of how the client wrote them.
+ */
+function ipv6First64(ip: string): string {
+  const parts = ip.split(':');
+  const emptyIdx = parts.indexOf('');
+  let expanded: string[];
+  if (emptyIdx === -1) {
+    expanded = parts;
+  } else {
+    const before = parts.slice(0, emptyIdx).filter(p => p !== '');
+    const after = parts.slice(emptyIdx + 1).filter(p => p !== '');
+    const zerosNeeded = 8 - before.length - after.length;
+    expanded = [...before, ...Array(Math.max(zerosNeeded, 0)).fill('0'), ...after];
+  }
+  while (expanded.length < 8) expanded.push('0');
+  return expanded
+    .slice(0, 4)
+    .map(p => p.padStart(4, '0').toLowerCase())
+    .join(':');
+}
+
+function bucketPrefix(mobile: string): string {
+  return mobile.slice(0, OTP_PREFIX_LENGTH);
 }
 
 /* ==============================================================================

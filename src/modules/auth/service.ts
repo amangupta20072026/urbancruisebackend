@@ -63,9 +63,10 @@ import {
   ForbiddenError,
   RateLimitError,
   ConflictError,
+  ServiceUnavailableError,
   AppError,
 } from '../../shared/errors/index.js';
-import { dispatchOtp } from '../../shared/providers/msg91/otp.js';
+import { dispatchOtp, type OtpDispatchResult } from '../../shared/providers/msg91/otp.js';
 import * as repo from './repository.js';
 import { AUTH_ERROR } from './types.js';
 import type {
@@ -164,27 +165,44 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
 
   // 6. Dispatch — test mobiles skip MSG91 entirely; everyone else gets SMS.
   let providerRequestId: string | null = null;
+  let attemptNumber = 1;
 
   if (isTest) {
     logger.warn({ mobile: maskMobile(mobile) }, 'otp send: TEST MODE (no real SMS)');
   } else {
     const dispatch = await dispatchOtp(mobile, otp);
     providerRequestId = dispatch.providerRequestId ?? null;
+    attemptNumber = dispatch.attempts > 0 ? dispatch.attempts : 1;
 
     if (!dispatch.ok) {
-      const failCode = mapDispatchFailure(dispatch.failure);
+      logDispatchFailure(mobile, p.role, dispatch);
       await audit({
         mobile,
         role: p.role,
         event: 'send_failed',
         channel: 'sms',
+        attemptNumber,
         ...(providerRequestId ? { providerRequestId } : {}),
         ...(dispatch.errorCode ? { code: dispatch.errorCode } : {}),
         ...(dispatch.errorMessage ? { msg: dispatch.errorMessage } : {}),
         idempotencyKey: p.idempotencyKey,
         ip: p.ip,
       });
-      throw new ConflictErrorWith(dispatch.errorMessage ?? 'OTP send failed.', failCode);
+      throwDispatchError(dispatch);
+    }
+
+    // Log a successful retry so operators can see transient hiccups without
+    // digging through failure logs.
+    if (attemptNumber > 1) {
+      logger.warn(
+        {
+          alarm: 'msg91_retry_succeeded',
+          attemptNumber,
+          providerRequestId,
+          mobile: maskMobile(mobile),
+        },
+        'msg91 send succeeded on retry',
+      );
     }
   }
 
@@ -195,6 +213,7 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
     event: 'send_succeeded',
     channel: isTest ? 'test' : 'sms',
     providerRequestId,
+    attemptNumber,
     idempotencyKey: p.idempotencyKey,
     isTest,
     ip: p.ip,
@@ -628,21 +647,113 @@ async function incrementSendCounters(mobile: string): Promise<void> {
   ]);
 }
 
-function mapDispatchFailure(f: string | undefined): string {
-  switch (f) {
+/* ==============================================================================
+ * MSG91 DISPATCH FAILURE HANDLING
+ * ==============================================================================
+ * Every provider failure is:
+ *   1. Logged at the RIGHT severity (config bugs → fatal + alarm=; provider
+ *      outages → error; routine network blips → warn) so ops alerting can
+ *      page on the ones that matter and ignore the rest.
+ *   2. Translated into a user-facing HTTP error whose `code` the mobile
+ *      client already handles, plus a status that's honest about cause
+ *      (503 for "provider unavailable"; 409 for everything else).
+ *
+ * These two concerns are split into `logDispatchFailure` (observability)
+ * and `throwDispatchError` (client contract) so future changes to one
+ * don't accidentally couple with the other.
+ * ============================================================================== */
+
+/**
+ * Log a failed dispatch at a severity that matches operational urgency.
+ *
+ *   fatal   — config broken; pages on-call immediately.
+ *   error   — provider outage; investigate but not necessarily paging.
+ *   warn    — routine transient blip; monitor but don't page.
+ *
+ * The `alarm` field on the fatal lines is the machine-friendly hook — wire
+ * your alerting stack (Loki, Datadog, Grafana Alerts, etc.) to match on
+ * `alarm=msg91_wallet_low`, `alarm=msg91_config_broken`, etc.
+ */
+function logDispatchFailure(mobile: string, role: UserRole, dispatch: OtpDispatchResult): void {
+  const base = {
+    mobile: maskMobile(mobile),
+    role,
+    failure: dispatch.failure,
+    providerErrorCode: dispatch.errorCode,
+    providerErrorMessage: dispatch.errorMessage,
+    attempts: dispatch.attempts,
+  };
+  switch (dispatch.failure) {
     case 'wallet_low':
-      // Provider account has no credit — surfaced as SIGNUPS_DISABLED so the
-      // mobile client shows the generic "try later" screen instead of a
-      // technical error. Ops gets paged via the provider's own alerts.
-      return AUTH_ERROR.SIGNUPS_DISABLED;
-    case 'rate_limited':
-      return 'provider_rate_limited';
+      logger.fatal(
+        { alarm: 'msg91_wallet_low', ...base },
+        'msg91 wallet is empty — every OTP send is now failing until balance is topped up',
+      );
+      break;
     case 'template_bad':
     case 'provider_forbidden':
-      // Configuration / auth issues on the provider side — user-side unfixable.
-      return AUTH_ERROR.OTP_SEND_FAILED;
+      logger.fatal(
+        { alarm: 'msg91_config_broken', ...base },
+        'msg91 auth or DLT template rejected — check MSG91_AUTH_KEY / MSG91_SMS_TEMPLATE_ID / MSG91_SMS_SENDER_ID',
+      );
+      break;
+    case 'rate_limited':
+      logger.error(
+        { alarm: 'msg91_rate_limited', ...base },
+        'msg91 is rate-limiting our account — traffic burst or DLT trap on their side',
+      );
+      break;
+    case 'circuit_open':
+      // The circuit is open because we already logged fatal when it opened.
+      // Individual short-circuits are just warn — they're the breaker doing
+      // its job, not new information.
+      logger.warn(base, 'msg91 circuit breaker is open — short-circuited send');
+      break;
+    case 'provider_server_error':
+      logger.error(base, 'msg91 returned 5xx after retry — provider-side outage');
+      break;
+    case 'timeout':
+    case 'network':
+      logger.warn(base, 'msg91 send failed with transient network condition after retry');
+      break;
+    case 'unknown':
     default:
-      return AUTH_ERROR.OTP_SEND_FAILED;
+      logger.error(base, 'msg91 send failed with unclassified provider response');
+      break;
+  }
+}
+
+/**
+ * Convert a failed dispatch into an appropriate `AppError` subclass and
+ * throw. Never returns.
+ *
+ * Mapping rules:
+ *   - Provider is temporarily unavailable (wallet empty, breaker open) → 503
+ *     with `SERVICE_UNAVAILABLE`. The mobile client shows "try again shortly."
+ *   - Provider rejected the request for a reason the user can't fix (config
+ *     bug, bad template, our account is throttled) → 409 with
+ *     `OTP_SEND_FAILED`. Same UX message, different underlying cause.
+ */
+function throwDispatchError(dispatch: OtpDispatchResult): never {
+  const msg = dispatch.errorMessage ?? 'OTP send failed.';
+  switch (dispatch.failure) {
+    case 'wallet_low':
+    case 'circuit_open':
+      throw new ServiceUnavailableError(
+        'OTP service is temporarily unavailable. Please try again shortly.',
+        AUTH_ERROR.SERVICE_UNAVAILABLE,
+        { reason: dispatch.failure },
+      );
+    case 'rate_limited':
+      throw new ConflictErrorWith(msg, 'provider_rate_limited');
+    case 'template_bad':
+    case 'provider_forbidden':
+    case 'provider_server_error':
+    case 'timeout':
+    case 'network':
+    case 'unknown':
+    default:
+      throw new ConflictErrorWith(msg, AUTH_ERROR.OTP_SEND_FAILED);
   }
 }
 
@@ -664,6 +775,7 @@ async function audit(a: {
   providerRequestId?: string | null;
   code?: string;
   msg?: string;
+  attemptNumber?: number;
   idempotencyKey?: string | null;
   isTest?: boolean;
   ip?: string | null;
@@ -679,6 +791,7 @@ async function audit(a: {
       msg91RequestId: a.providerRequestId ?? null,
       msg91ErrorCode: a.code ?? null,
       msg91ErrorMessage: a.msg ?? null,
+      attemptNumber: a.attemptNumber ?? 1,
       idempotencyKey: a.idempotencyKey ?? null,
       ip: a.ip ?? null,
       isTest: a.isTest ?? false,

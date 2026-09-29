@@ -28,6 +28,17 @@ export const AUTH_ERROR = {
   OTP_SEND_FAILED: 'otp_send_failed',
   OTP_INVALID: 'otp_invalid',
   OTP_EXPIRED: 'otp_expired',
+  /**
+   * Upstream OTP provider is temporarily unable to deliver messages.
+   * Surfaced with HTTP 503. Causes include:
+   *   - MSG91 wallet balance exhausted (top up)
+   *   - MSG91 circuit breaker open (provider had repeated recent failures)
+   *
+   * Mobile client shows a "try again shortly" screen. This is distinct from
+   * `OTP_SEND_FAILED` (config bug on our side) and `SIGNUPS_DISABLED` (a
+   * business decision) — the code lets ops-side alerting distinguish them.
+   */
+  SERVICE_UNAVAILABLE: 'service_unavailable',
   SESSION_REVOKED: 'session_revoked',
   /**
    * Emitted by /auth/me when the underlying entity (customer/driver/…) row

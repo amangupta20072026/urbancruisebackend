@@ -63,6 +63,40 @@ export const OTP_SEND_MAX_PER_DAY = 100;
 export const OTP_SEND_MIN_INTERVAL_SECONDS = 30;
 
 /* ==============================================================================
+ * MSG91 provider reliability — retry + circuit breaker
+ * ============================================================================== */
+
+/**
+ * How many times to retry a TRANSIENT MSG91 failure inside one dispatch call.
+ * "Transient" means `network`, `timeout`, or a provider 5xx — cases where the
+ * request may not have reached MSG91 or their side had a temporary problem.
+ * NEVER retries `wallet_low`, `template_bad`, `provider_forbidden`, or
+ * `rate_limited` — retrying those either wastes money or makes rate-limit
+ * throttling worse.
+ *
+ * The retry sends the SAME OTP value, so if MSG91 actually processed the first
+ * request (but we didn't see the response), the user just gets two identical
+ * SMSes and uses either one. No security impact — the code in both is the same.
+ */
+export const MSG91_MAX_RETRIES = 1;
+/** Backoff before the retry attempt, in milliseconds. */
+export const MSG91_RETRY_DELAY_MS = 500;
+
+/**
+ * Circuit breaker — after N consecutive provider-side failures within
+ * MSG91_CB_WINDOW_SECONDS, we stop calling MSG91 for MSG91_CB_OPEN_SECONDS.
+ * During that window, /auth/otp/request returns 503 SERVICE_UNAVAILABLE
+ * immediately rather than eating an 8-second timeout per request.
+ *
+ * These values are tuned so a real MSG91 outage trips the breaker within a
+ * handful of requests, but transient glitches (one or two failures in a busy
+ * window) don't. Test-mobile sends bypass the breaker entirely.
+ */
+export const MSG91_CB_FAILURE_THRESHOLD = 5;
+export const MSG91_CB_WINDOW_SECONDS = 300; // 5 min sliding window
+export const MSG91_CB_OPEN_SECONDS = 60;
+
+/* ==============================================================================
  * Refresh-session cache
  * ============================================================================== */
 

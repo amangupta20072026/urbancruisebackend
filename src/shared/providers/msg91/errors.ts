@@ -22,16 +22,23 @@ import type { AxiosError, AxiosResponse } from 'axios';
 /**
  * Channel-neutral send outcome. Kept small on purpose — downstream code
  * pattern-matches on these, not on raw HTTP codes or provider strings.
+ *
+ * TRANSIENT outcomes (safe to retry inside dispatchOtp):
+ *   - timeout, network, provider_server_error
+ *
+ * NON-TRANSIENT outcomes (retrying makes it worse or wastes money):
+ *   - wallet_low, template_bad, provider_forbidden, rate_limited, unknown
  */
 export type ProviderOutcome =
   | 'success'
-  | 'wallet_low' // provider account has no credit — surface, do not retry
+  | 'wallet_low' // provider account has no credit — surface as 503, do not retry
   | 'template_bad' // template id / variables rejected — surface, do not retry
   | 'provider_forbidden' // 403 — auth key invalid / route disabled — surface
   | 'rate_limited' // provider-side rate limit hit — surface, do not retry
-  | 'timeout' // network timeout
-  | 'network' // no response at all
-  | 'unknown'; // any other 4xx/5xx we cannot classify
+  | 'provider_server_error' // 5xx — transient provider outage — retry once
+  | 'timeout' // network timeout — retry once
+  | 'network' // no response at all — retry once
+  | 'unknown'; // any other 4xx we cannot classify — do not retry
 
 /**
  * @deprecated Kept as an alias while callers migrate to `ProviderOutcome`.
@@ -119,6 +126,12 @@ export function parseMsg91Error(err: unknown): ProviderResult {
       if (code && /template/i.test(errMsg)) return build('template_bad', errMsg, code, body);
       return build('unknown', errMsg, code, body);
     default:
+      // 5xx from MSG91 — transient provider outage. Distinguished from
+      // 'unknown' (which is 4xx we can't classify) because 5xx is safe to
+      // retry once whereas a mystery 4xx probably isn't.
+      if (status >= 500 && status <= 599) {
+        return build('provider_server_error', errMsg, code, body);
+      }
       return build('unknown', errMsg, code, body);
   }
 }

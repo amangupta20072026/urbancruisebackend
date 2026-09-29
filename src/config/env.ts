@@ -67,10 +67,7 @@ const schema = z.object({
   // MSG91_TEST_OTP. Kept in env so QA can add/remove without a deploy.
   // Format: '919876543210,919000000001'
   MSG91_TEST_MOBILES: z.string().default(''),
-  MSG91_TEST_OTP: z
-    .string()
-    .regex(/^\d{6}$/)
-    .default('654321'),
+  MSG91_TEST_OTP: z.string().regex(/^\d{6}$/),
 
   // ── JWT ─────────────────────────────────────────────────────────────────
   JWT_ACCESS_SECRET: secretSchema,

@@ -12,7 +12,7 @@
  *      credit on a number that will 403 at verify anyway)
  *   4. Per-mobile rate limits          (Redis counters)
  *   5. Generate OTP, hash, store in Redis session
- *   6. MSG91 dispatch (WhatsApp with SMS fallback)
+ *   6. MSG91 dispatch (SMS via Flow API v5)
  *   7. Snapshot response for idempotency
  *   8. Insert otp_events row
  *
@@ -154,7 +154,7 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
     mobile,
     otpHash,
     role: p.role,
-    channel: 'whatsapp', // may be updated to 'sms' after dispatch
+    channel: 'sms',
     isTest,
     attempts: 0,
     sentAt: Date.now(),
@@ -162,25 +162,22 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
 
   await redis.set(otpSession(requestId), JSON.stringify(session), 'EX', OTP_SESSION_TTL_SECONDS);
 
-  // 6. Dispatch — test mobiles skip MSG91 entirely
-  let channel: 'whatsapp' | 'sms' = 'whatsapp';
+  // 6. Dispatch — test mobiles skip MSG91 entirely; everyone else gets SMS.
   let providerRequestId: string | null = null;
 
   if (isTest) {
     logger.warn({ mobile: maskMobile(mobile) }, 'otp send: TEST MODE (no real SMS)');
   } else {
     const dispatch = await dispatchOtp(mobile, otp);
-    channel = dispatch.channel;
     providerRequestId = dispatch.providerRequestId ?? null;
 
     if (!dispatch.ok) {
       const failCode = mapDispatchFailure(dispatch.failure);
-      await touchMobileOnFailure(mobile, dispatch.failure, dispatch.errorCode);
       await audit({
         mobile,
         role: p.role,
         event: 'send_failed',
-        channel,
+        channel: 'sms',
         ...(providerRequestId ? { providerRequestId } : {}),
         ...(dispatch.errorCode ? { code: dispatch.errorCode } : {}),
         ...(dispatch.errorMessage ? { msg: dispatch.errorMessage } : {}),
@@ -189,10 +186,6 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
       });
       throw new ConflictErrorWith(dispatch.errorMessage ?? 'OTP send failed.', failCode);
     }
-
-    // Update session's channel — verify path reads this back if needed
-    session.channel = channel;
-    await redis.set(otpSession(requestId), JSON.stringify(session), 'EX', OTP_SESSION_TTL_SECONDS);
   }
 
   // 7. Insert audit event
@@ -200,7 +193,7 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
     mobile,
     role: p.role,
     event: 'send_succeeded',
-    channel: isTest ? 'test' : channel,
+    channel: isTest ? 'test' : 'sms',
     providerRequestId,
     idempotencyKey: p.idempotencyKey,
     isTest,
@@ -213,7 +206,7 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
   const response: RequestOtpResponseDto = {
     requestId,
     resendAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
-    channel,
+    channel: 'sms',
     testMode: isTest,
   };
 
@@ -635,28 +628,18 @@ async function incrementSendCounters(mobile: string): Promise<void> {
   ]);
 }
 
-async function touchMobileOnFailure(
-  mobile: string,
-  outcome: string | undefined,
-  code: string | undefined,
-): Promise<void> {
-  if (outcome === 'phone_not_wa') {
-    // WhatsApp not deliverable → future sends skip WA
-    await repo.markWhatsappUndeliverable(mobile, code ?? '131026');
-  }
-  if (outcome === 'user_blocked') {
-    await repo.markWhatsappUndeliverable(mobile, code ?? 'user_blocked');
-  }
-}
-
 function mapDispatchFailure(f: string | undefined): string {
   switch (f) {
     case 'wallet_low':
+      // Provider account has no credit — surfaced as SIGNUPS_DISABLED so the
+      // mobile client shows the generic "try later" screen instead of a
+      // technical error. Ops gets paged via the provider's own alerts.
       return AUTH_ERROR.SIGNUPS_DISABLED;
     case 'rate_limited':
       return 'provider_rate_limited';
-    case 'waba_suspended':
     case 'template_bad':
+    case 'provider_forbidden':
+      // Configuration / auth issues on the provider side — user-side unfixable.
       return AUTH_ERROR.OTP_SEND_FAILED;
     default:
       return AUTH_ERROR.OTP_SEND_FAILED;
@@ -677,7 +660,7 @@ async function audit(a: {
     | 'verify_failed'
     | 'rate_limited'
     | 'account_not_provisioned';
-  channel?: 'whatsapp' | 'sms' | 'voice' | 'test';
+  channel?: 'sms' | 'test';
   providerRequestId?: string | null;
   code?: string;
   msg?: string;
@@ -691,7 +674,7 @@ async function audit(a: {
       roleRequested: a.role,
       purpose: 'login',
       eventType: a.event,
-      channel: a.channel ?? 'whatsapp',
+      channel: a.channel ?? 'sms',
       provider: 'msg91',
       msg91RequestId: a.providerRequestId ?? null,
       msg91ErrorCode: a.code ?? null,

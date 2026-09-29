@@ -48,7 +48,13 @@ export type OtpSession = {
   mobile: string;
   otpHash: string;
   role: UserRole;
-  channel: 'whatsapp' | 'sms';
+  /**
+   * Delivery channel of the OTP that produced this session.
+   * SMS is the only supported channel today. When email OTP lands, widen
+   * to `'sms' | 'email'` — the value is recorded so verify audit / login
+   * events can attribute the channel used.
+   */
+  channel: 'sms';
   isTest: boolean;
   attempts: number;
   sentAt: number;
@@ -116,10 +122,18 @@ export type VerifyOtpResponseDto = {
   profile: UserProfileDto;
 };
 
+/**
+ * Response for POST /auth/otp/request.
+ *
+ * `channel` is deliberately kept in the shape (rather than removed) so the
+ * shipped mobile app — which reads it — continues to parse the payload
+ * unchanged. When email OTP lands, widen the union to `'sms' | 'email'`
+ * and set it from the resolved dispatch channel. Do not drop the field.
+ */
 export type RequestOtpResponseDto = {
   requestId: string;
   resendAfterSeconds: number;
-  channel: 'whatsapp' | 'sms';
+  channel: 'sms';
   testMode: boolean;
 };
 

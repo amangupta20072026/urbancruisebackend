@@ -1,144 +1,76 @@
 /**
  * ==============================================================================
- * MSG91 OTP dispatch — server-owned OTP over WhatsApp with SMS fallback
+ * MSG91 OTP dispatch — server-owned OTP over SMS (Flow API v5)
  * ==============================================================================
- * WE generate the OTP (crypto.randomInt) and pass it to MSG91 as a template
- * parameter. MSG91 is JUST the message transport — no MSG91-managed OTP
- * state. This gives us full server-side control of retries, rate limits,
- * brute-force locks, and test mode.
+ * WE generate the OTP (crypto.randomInt in the auth service) and pass it to
+ * MSG91 as a template variable. MSG91 is JUST the message transport — no
+ * MSG91-managed OTP state. This gives us full server-side control of retries,
+ * rate limits, brute-force locks, and test mode, and keeps verify latency at
+ * Redis speed rather than MSG91-roundtrip speed.
  *
- * TEMPLATE CONTRACT:
- *   WhatsApp — MSG91_WA_TEMPLATE_NAME must be pre-approved with ONE
- *              body variable in slot {{1}}: the OTP.
- *   SMS      — MSG91_SMS_TEMPLATE_ID must have the OTP as ##OTP##.
+ * TEMPLATE CONTRACT (configured in MSG91 dashboard, DLT-approved for India):
+ *   MSG91_SMS_TEMPLATE_ID must expose the OTP as the ##OTP## variable.
+ *   MSG91_SMS_SENDER_ID must be the pre-approved 6-char alpha sender.
  *
- * FALLBACK RULES (per failure matrix):
- *   • MSG91 returns phone_not_wa (Meta 131026) → SMS retry with the SAME OTP.
- *   • MSG91 returns waba_suspended             → SMS immediately.
- *   • MSG91 returns wallet_low                 → don't fall back, surface error.
- *   • MSG91 returns rate_limited               → don't fall back, surface error.
- *   • Timeout / network                        → SMS retry once.
+ * REFERENCE (official):
+ *   https://api.msg91.com/apidoc/textsms/send-sms-flow.php
  *
- * Fallback happens INSIDE this file — callers see one function that either
- * succeeds (with channel: 'whatsapp' | 'sms') or fails.
+ * ROADMAP:
+ *   When email OTP lands, add a sibling `dispatchEmailOtp()` (or a channel-
+ *   aware `dispatchOtp({ channel, target, otp })`). This file's contract —
+ *   returns a `ProviderResult`-shaped object — stays the audit / retry
+ *   surface for every channel.
  * ==============================================================================
  */
 import { msg91Client } from './client.js';
-import { parseMsg91Response, parseMsg91Error, type Msg91Outcome } from './errors.js';
+import { parseMsg91Response, parseMsg91Error, type ProviderOutcome } from './errors.js';
 import { ENV } from '../../../config/env.js';
-import { logger } from '../../logger/index.js';
 
-export type Msg91DispatchResult = {
+export type OtpDispatchResult = {
   /** True when the message was accepted by MSG91 (delivery is async). */
   ok: boolean;
-  /** Actual channel used — 'sms' means WhatsApp fell back. */
-  channel: 'whatsapp' | 'sms';
   /** MSG91's request ID (echoed in delivery webhook). Undefined on hard fail. */
   providerRequestId?: string;
   /** Internal failure outcome when ok=false. */
-  failure?: Msg91Outcome;
+  failure?: ProviderOutcome;
   errorCode?: string;
   errorMessage?: string;
 };
 
 /**
- * Send `otp` to `mobile` via WhatsApp; auto-fall-back to SMS on
- * phone_not_wa / waba_suspended / timeout / network.
+ * @deprecated Kept as an alias while callers migrate to `OtpDispatchResult`.
+ */
+export type Msg91DispatchResult = OtpDispatchResult;
+
+/**
+ * Send `otp` to `mobile` via MSG91 Flow API (transactional SMS route).
  *
  * `mobile` MUST be in E.164 without '+' (e.g. '919812345678').
+ * `otp` is the plaintext code as it should appear in the SMS.
+ *
+ * The function never throws for provider-level failures — every outcome
+ * (success or classified failure) is returned as data so the caller can
+ * decide how to surface / audit it. Only programmer errors (bad env, etc.)
+ * would bubble up.
  */
-export async function dispatchOtp(mobile: string, otp: string): Promise<Msg91DispatchResult> {
-  const wa = await sendWhatsApp(mobile, otp);
-  if (wa.ok) return wa;
-
-  // Decide whether to fall back or bubble up.
-  const shouldFallback =
-    wa.failure === 'phone_not_wa' ||
-    wa.failure === 'waba_suspended' ||
-    wa.failure === 'timeout' ||
-    wa.failure === 'network';
-
-  if (!shouldFallback) return wa;
-
-  logger.warn(
-    { mobile: maskMobile(mobile), reason: wa.failure, code: wa.errorCode },
-    'msg91 whatsapp failed — falling back to SMS',
-  );
-
+export async function dispatchOtp(mobile: string, otp: string): Promise<OtpDispatchResult> {
   return sendSms(mobile, otp);
 }
 
 /* -----------------------------------------------------------------
- * WhatsApp — MSG91 Integration API v5
+ * SMS — MSG91 Flow API v5 (transactional route with DLT template)
  * ----------------------------------------------------------------- */
 
-async function sendWhatsApp(mobile: string, otp: string): Promise<Msg91DispatchResult> {
-  // MSG91 WhatsApp payload shape.
-  // Ref: https://docs.msg91.com/whatsapp/whatsapp-api
-  const payload = {
-    integrated_number: ENV.MSG91_WA_INTEGRATED_NUMBER,
-    content_type: 'template',
-    payload: {
-      messaging_product: 'whatsapp',
-      type: 'template',
-      template: {
-        name: ENV.MSG91_WA_TEMPLATE_NAME,
-        language: { code: 'en', policy: 'deterministic' },
-        namespace: null,
-        to_and_components: [
-          {
-            to: [mobile],
-            components: {
-              // {{1}} in the approved template body
-              body_1: { type: 'text', value: otp },
-            },
-          },
-        ],
-      },
-    },
-  };
-
-  try {
-    const res = await msg91Client.post('/v5/whatsapp/whatsapp-outbound-message/bulk/', payload);
-    const parsed = parseMsg91Response(res);
-
-    if (parsed.outcome === 'success') {
-      return {
-        ok: true,
-        channel: 'whatsapp',
-        ...(parsed.requestId ? { providerRequestId: parsed.requestId } : {}),
-      };
-    }
-    return {
-      ok: false,
-      channel: 'whatsapp',
-      failure: parsed.outcome,
-      ...(parsed.errorCode ? { errorCode: parsed.errorCode } : {}),
-      ...(parsed.errorMessage ? { errorMessage: parsed.errorMessage } : {}),
-    };
-  } catch (err) {
-    const parsed = parseMsg91Error(err);
-    return {
-      ok: false,
-      channel: 'whatsapp',
-      failure: parsed.outcome,
-      ...(parsed.errorCode ? { errorCode: parsed.errorCode } : {}),
-      ...(parsed.errorMessage ? { errorMessage: parsed.errorMessage } : {}),
-    };
-  }
-}
-
-/* -----------------------------------------------------------------
- * SMS — MSG91 Flow API (transactional route with pre-approved template)
- * ----------------------------------------------------------------- */
-
-async function sendSms(mobile: string, otp: string): Promise<Msg91DispatchResult> {
+async function sendSms(mobile: string, otp: string): Promise<OtpDispatchResult> {
+  // Payload shape per MSG91 Flow API v5 docs.
+  // `OTP` (upper-case) is the template variable name — must match the
+  // approved template's placeholder (##OTP##).
   const payload = {
     template_id: ENV.MSG91_SMS_TEMPLATE_ID,
     sender: ENV.MSG91_SMS_SENDER_ID,
     short_url: '0',
     mobiles: mobile,
-    OTP: otp, // matches ##OTP## variable in the SMS template
+    OTP: otp,
   };
 
   try {
@@ -148,13 +80,11 @@ async function sendSms(mobile: string, otp: string): Promise<Msg91DispatchResult
     if (parsed.outcome === 'success') {
       return {
         ok: true,
-        channel: 'sms',
         ...(parsed.requestId ? { providerRequestId: parsed.requestId } : {}),
       };
     }
     return {
       ok: false,
-      channel: 'sms',
       failure: parsed.outcome,
       ...(parsed.errorCode ? { errorCode: parsed.errorCode } : {}),
       ...(parsed.errorMessage ? { errorMessage: parsed.errorMessage } : {}),
@@ -163,20 +93,9 @@ async function sendSms(mobile: string, otp: string): Promise<Msg91DispatchResult
     const parsed = parseMsg91Error(err);
     return {
       ok: false,
-      channel: 'sms',
       failure: parsed.outcome,
       ...(parsed.errorCode ? { errorCode: parsed.errorCode } : {}),
       ...(parsed.errorMessage ? { errorMessage: parsed.errorMessage } : {}),
     };
   }
-}
-
-/* -----------------------------------------------------------------
- * Helpers
- * ----------------------------------------------------------------- */
-
-/** Log-safe mobile — first 4 + last 2 digits, everything else '*'. */
-function maskMobile(mobile: string): string {
-  if (mobile.length < 8) return '****';
-  return `${mobile.slice(0, 4)}****${mobile.slice(-2)}`;
 }

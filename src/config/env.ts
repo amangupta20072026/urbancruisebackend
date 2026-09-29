@@ -54,13 +54,11 @@ const schema = z.object({
   REDIS_PORT: z.coerce.number().int().positive().max(65535).default(6379),
   REDIS_PASSWORD: z.string().min(1),
 
-  // ── MSG91 ───────────────────────────────────────────────────────────────
+  // ── MSG91 (SMS-only OTP transport) ──────────────────────────────────────
   // MSG91_AUTH_KEY — server-side auth key. Never ship in the RN app.
   MSG91_AUTH_KEY: z.string().min(1),
-  // WhatsApp template + integration for OTP flow. Approved by Meta in advance.
-  MSG91_WA_INTEGRATED_NUMBER: z.string().min(1),
-  MSG91_WA_TEMPLATE_NAME: z.string().min(1),
-  // SMS fallback route (transactional). Sender ID must be pre-approved.
+  // DLT-approved SMS template + pre-approved sender ID. The template must
+  // expose the OTP as the ##OTP## variable. Sender IDs are 3–11 alpha chars.
   MSG91_SMS_SENDER_ID: z.string().min(3).max(11),
   MSG91_SMS_TEMPLATE_ID: z.string().min(1),
   // HMAC secret used to verify MSG91 delivery-webhook signatures.

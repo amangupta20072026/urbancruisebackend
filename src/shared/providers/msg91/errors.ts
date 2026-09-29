@@ -1,35 +1,54 @@
 /**
  * ==============================================================================
- * MSG91 error normalization
+ * MSG91 error normalization (SMS-only)
  * ==============================================================================
- * MSG91 mixes HTTP status codes with WhatsApp-specific error codes in the
- * response body. This file collapses BOTH into a small set of internal
- * outcomes the service layer can pattern-match on.
+ * MSG91 sometimes returns `type: 'error'` inside a 200 body and sometimes uses
+ * regular non-2xx HTTP status codes. This file collapses BOTH into a small set
+ * of channel-neutral internal outcomes the service layer can pattern-match on.
+ *
+ * When email OTP lands as a second channel, its provider adapter should map
+ * into the SAME `ProviderOutcome` set so downstream logic (retry, audit, error
+ * surfacing) stays uniform.
  *
  * If MSG91 changes their codes, ONLY this file needs to update.
+ *
+ * References (official):
+ *   • Send SMS via Flow (v5): https://api.msg91.com/apidoc/textsms/send-sms-flow.php
+ *   • MSG91 error code index: https://msg91.com/help
  * ==============================================================================
  */
 import type { AxiosError, AxiosResponse } from 'axios';
 
-export type Msg91Outcome =
+/**
+ * Channel-neutral send outcome. Kept small on purpose — downstream code
+ * pattern-matches on these, not on raw HTTP codes or provider strings.
+ */
+export type ProviderOutcome =
   | 'success'
-  | 'phone_not_wa'
-  | 'user_blocked'
-  | 'wallet_low'
-  | 'template_bad'
-  | 'waba_suspended'
-  | 'rate_limited'
-  | 'timeout'
-  | 'network'
-  | 'unknown';
+  | 'wallet_low' // provider account has no credit — surface, do not retry
+  | 'template_bad' // template id / variables rejected — surface, do not retry
+  | 'provider_forbidden' // 403 — auth key invalid / route disabled — surface
+  | 'rate_limited' // provider-side rate limit hit — surface, do not retry
+  | 'timeout' // network timeout
+  | 'network' // no response at all
+  | 'unknown'; // any other 4xx/5xx we cannot classify
 
-export type Msg91Result = {
-  outcome: Msg91Outcome;
+/**
+ * @deprecated Kept as an alias while callers migrate to `ProviderOutcome`.
+ * Remove once no imports of `Msg91Outcome` remain.
+ */
+export type Msg91Outcome = ProviderOutcome;
+
+export type ProviderResult = {
+  outcome: ProviderOutcome;
   requestId?: string;
   raw?: unknown;
   errorCode?: string;
   errorMessage?: string;
 };
+
+/** @deprecated alias — see ProviderOutcome. */
+export type Msg91Result = ProviderResult;
 
 /** Loose shape of MSG91 body — every field optional; we probe via safe reads. */
 type Msg91Body = {
@@ -41,21 +60,21 @@ type Msg91Body = {
   data?: unknown;
 };
 
-const META_PHONE_NOT_WHATSAPP = '131026';
-const META_USER_BLOCKED_CODES = new Set(['131048', '131049', '131050']);
-
 /**
  * Parse a SUCCESSFUL axios response body (2xx). MSG91 may still return
  * `type: 'error'` inside a 200 body — check the body flag, not just status.
+ *
+ * On success, MSG91's Flow API echoes the provider request-id in `message`;
+ * we surface it so the webhook can be correlated later.
  */
-export function parseMsg91Response(res: AxiosResponse): Msg91Result {
+export function parseMsg91Response(res: AxiosResponse): ProviderResult {
   const body = (res.data ?? {}) as Msg91Body;
 
   const type = String(body.type ?? '').toLowerCase();
   const message = body.message !== undefined ? String(body.message) : undefined;
 
   if (type === 'success') {
-    const out: Msg91Result = { outcome: 'success', raw: body };
+    const out: ProviderResult = { outcome: 'success', raw: body };
     if (message) out.requestId = message;
     return out;
   }
@@ -63,13 +82,10 @@ export function parseMsg91Response(res: AxiosResponse): Msg91Result {
   const code = extractErrorCode(body);
   const errMsg = String(body.message ?? body.error ?? 'MSG91 error');
 
-  if (code === META_PHONE_NOT_WHATSAPP) {
-    return build('phone_not_wa', errMsg, code, body);
+  // 200 with type='error' — classify by message/code where we can, otherwise unknown.
+  if (code && /template/i.test(errMsg)) {
+    return build('template_bad', errMsg, code, body);
   }
-  if (code && META_USER_BLOCKED_CODES.has(code)) {
-    return build('user_blocked', errMsg, code, body);
-  }
-
   return build('unknown', errMsg, code, body);
 }
 
@@ -77,7 +93,7 @@ export function parseMsg91Response(res: AxiosResponse): Msg91Result {
  * Parse an axios ERROR (non-2xx or transport-level). Maps HTTP status to
  * the internal outcome set.
  */
-export function parseMsg91Error(err: unknown): Msg91Result {
+export function parseMsg91Error(err: unknown): ProviderResult {
   const ax = err as AxiosError;
 
   if (ax?.code === 'ECONNABORTED' || /timeout/i.test(ax?.message ?? '')) {
@@ -96,7 +112,7 @@ export function parseMsg91Error(err: unknown): Msg91Result {
     case 402:
       return build('wallet_low', errMsg, code, body);
     case 403:
-      return build('waba_suspended', errMsg, code, body);
+      return build('provider_forbidden', errMsg, code, body);
     case 429:
       return build('rate_limited', errMsg, code, body);
     case 400:
@@ -108,12 +124,12 @@ export function parseMsg91Error(err: unknown): Msg91Result {
 }
 
 function build(
-  outcome: Msg91Outcome,
+  outcome: ProviderOutcome,
   errMsg: string,
   code: string | undefined,
   raw: unknown,
-): Msg91Result {
-  const r: Msg91Result = { outcome, errorMessage: errMsg, raw };
+): ProviderResult {
+  const r: ProviderResult = { outcome, errorMessage: errMsg, raw };
   if (code) r.errorCode = code;
   return r;
 }

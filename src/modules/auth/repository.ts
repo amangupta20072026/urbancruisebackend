@@ -28,7 +28,6 @@ import type { UserRole, SubRole } from '../../shared/rbac/roles.js';
 
 export type MobileFlags = {
   mobile: string;
-  whatsapp_deliverable: 'unknown' | 'yes' | 'no';
   verify_failure_count: number;
   verify_locked_until: Date | null;
   captcha_required_until: Date | null;
@@ -38,7 +37,7 @@ export type MobileFlags = {
 
 export async function getMobileFlags(mobile: string): Promise<MobileFlags | null> {
   const [rows] = await pool.execute<RowDataPacket[]>(
-    `SELECT mobile, whatsapp_deliverable, verify_failure_count,
+    `SELECT mobile, verify_failure_count,
             verify_locked_until, captcha_required_until,
             admin_blocked, admin_blocked_reason
        FROM mobile_registry
@@ -53,18 +52,6 @@ export async function touchMobileRegistry(mobile: string): Promise<void> {
     `INSERT INTO mobile_registry (mobile) VALUES (?)
      ON DUPLICATE KEY UPDATE last_seen_at = CURRENT_TIMESTAMP`,
     [mobile],
-  );
-}
-
-export async function markWhatsappUndeliverable(mobile: string, code: string): Promise<void> {
-  await pool.execute(
-    `INSERT INTO mobile_registry (mobile, whatsapp_deliverable, whatsapp_last_failure_at, whatsapp_last_failure_code)
-         VALUES (?, 'no', NOW(), ?)
-     ON DUPLICATE KEY UPDATE
-       whatsapp_deliverable       = 'no',
-       whatsapp_last_failure_at   = NOW(),
-       whatsapp_last_failure_code = VALUES(whatsapp_last_failure_code)`,
-    [mobile, code],
   );
 }
 
@@ -631,12 +618,20 @@ export type OtpEventInsert = {
     | 'verify_failed'
     | 'rate_limited'
     | 'account_not_provisioned';
-  channel: 'whatsapp' | 'sms' | 'voice' | 'test';
+  /**
+   * Delivery channel for this audit row.
+   *   - 'sms'  — real MSG91 send
+   *   - 'test' — test-mobile bypass (no MSG91 call)
+   * When email OTP lands, widen to include 'email'.
+   *
+   * Historical rows may hold 'whatsapp' or 'voice' (legacy). New writes
+   * never produce those values, but the DB column may still contain them.
+   */
+  channel: 'sms' | 'test';
   provider?: string;
   msg91RequestId?: string | null;
   msg91ErrorCode?: string | null;
   msg91ErrorMessage?: string | null;
-  fallbackFromChannel?: 'whatsapp' | 'sms' | 'voice' | null;
   idempotencyKey?: string | null;
   attemptNumber?: number;
   ip?: string | null;
@@ -648,6 +643,9 @@ export type OtpEventInsert = {
 };
 
 export async function insertOtpEvent(e: OtpEventInsert): Promise<void> {
+  // NOTE: `fallback_from_channel` remains a column on `otp_events` for
+  // historical rows written before the SMS-only migration. New writes
+  // always bind NULL for it — the WhatsApp→SMS fallback concept is gone.
   await pool.execute(
     `INSERT INTO otp_events
        (mobile, role_requested, purpose, event_type, channel, provider,
@@ -664,7 +662,7 @@ export async function insertOtpEvent(e: OtpEventInsert): Promise<void> {
       e.provider ?? 'msg91',
       e.idempotencyKey ?? null,
       e.attemptNumber ?? 1,
-      e.fallbackFromChannel ?? null,
+      null, // fallback_from_channel — always NULL post SMS-only migration
       e.msg91RequestId ?? null,
       e.msg91ErrorCode ?? null,
       e.msg91ErrorMessage ?? null,

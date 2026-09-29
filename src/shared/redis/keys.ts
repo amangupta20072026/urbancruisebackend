@@ -73,12 +73,9 @@ export const sessionsActive = (role: UserRole, entityId: string): string =>
  * ----------------------------------------------------------------- */
 
 export const healthMsg91Wallet = (): string => 'health:msg91:wallet';
-export const healthMsg91Waba = (): string => 'health:msg91:waba';
-export const healthMsg91Template = (name: string): string => `health:msg91:template:${name}`;
 
 /* -----------------------------------------------------------------
  * Circuit breakers
  * ----------------------------------------------------------------- */
 
-export const circuitBreakerMsg91Whatsapp = (): string => 'cb:msg91:whatsapp';
 export const circuitBreakerMsg91Sms = (): string => 'cb:msg91:sms';

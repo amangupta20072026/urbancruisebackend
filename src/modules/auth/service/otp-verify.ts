@@ -6,7 +6,7 @@
  *
  * ORDER OF CHECKS (matters — keep this order):
  *   1. Mobile locked?
- *   2. Load Redis session by requestId
+ *   2. Load session store by requestId
  *   3. Verify OTP hash — safe-equal
  *   4. On success: single-use — DELETE session immediately
  *   5. Resolve user (create-if-customer / require-if-else)
@@ -14,10 +14,12 @@
  *   7. Mint session + tokens (transactional)
  *   8. Load profile
  *   9. Insert login_events row
+ *
+ * DESIGN CHANGE (DIP fix):
+ *   Accepts AuthServiceDeps. All Redis/DB access goes through
+ *   deps.store and deps.repo respectively.
  * ==============================================================================
  */
-import { redis } from '../../../shared/redis/client.js';
-import { otpSession, otpVerifyFail, sessionsActive } from '../../../shared/redis/keys.js';
 import {
   VERIFY_FAIL_WINDOW_SECONDS,
   VERIFY_FAIL_LOCK_THRESHOLD,
@@ -31,10 +33,10 @@ import { hashForStorage } from '../../../shared/auth/tokens.js';
 import { AuthError, ForbiddenError, RateLimitError } from '../../../shared/errors/index.js';
 import { expiryFromTtl } from '../../../shared/utils/duration.js';
 import { normalizeMobile } from '../../../shared/utils/phone.js';
-import * as repo from '../repository/index.js';
 import { AUTH_ERROR } from '../types.js';
-import type { OtpSession, VerifyOtpResponseDto, DeviceMeta } from '../types.js';
+import type { VerifyOtpResponseDto, DeviceMeta } from '../types.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
+import type { AuthServiceDeps } from '../infrastructure/AuthContainer.js';
 import { audit } from './audit.js';
 
 /* ==============================================================================
@@ -52,7 +54,11 @@ export type VerifyOtpParams = {
   userAgent: string | null;
 };
 
-export async function verifyOtp(p: VerifyOtpParams): Promise<VerifyOtpResponseDto> {
+export async function verifyOtp(
+  deps: AuthServiceDeps,
+  p: VerifyOtpParams,
+): Promise<VerifyOtpResponseDto> {
+  const { store, repo } = deps;
   const mobile = normalizeMobile(p.phone, p.countryCode);
 
   // 1. Mobile locked?
@@ -66,17 +72,15 @@ export async function verifyOtp(p: VerifyOtpParams): Promise<VerifyOtpResponseDt
     );
   }
 
-  // 2. Load session (by requestId)
+  // 2. Load session
   if (!p.requestId) {
     throw new AuthError('Missing OTP session — request a new code.', AUTH_ERROR.OTP_EXPIRED);
   }
-  const raw = await redis.get(otpSession(p.requestId));
-  if (!raw) {
+  const session = await store.getOtpSession(p.requestId);
+  if (!session) {
     throw new AuthError('This OTP has expired.', AUTH_ERROR.OTP_EXPIRED);
   }
-  const session = JSON.parse(raw) as OtpSession;
   if (session.mobile !== mobile || session.role !== p.role) {
-    // Session was for a different (mobile, role) — treat as invalid.
     throw new AuthError('That code doesn\u2019t match.', AUTH_ERROR.OTP_INVALID);
   }
 
@@ -85,29 +89,26 @@ export async function verifyOtp(p: VerifyOtpParams): Promise<VerifyOtpResponseDt
   const match = safeEqual(otpHash, session.otpHash);
 
   if (!match) {
-    // Increment counters. Redis fast counter first; actual lock happens in DB
-    // once we cross the threshold within the DB-tracked window.
-    const fails = await redis.incr(otpVerifyFail(mobile));
-    if (fails === 1) await redis.expire(otpVerifyFail(mobile), VERIFY_FAIL_WINDOW_SECONDS);
+    const redisFailCount = await store.incrementVerifyFail(mobile, VERIFY_FAIL_WINDOW_SECONDS);
+    void redisFailCount; // used only as a fast counter; DB is authoritative for locking
     const dbFails = await repo.incrementVerifyFailure(mobile);
     if (dbFails >= VERIFY_FAIL_LOCK_THRESHOLD) {
       const until = new Date(Date.now() + VERIFY_LOCK_DURATION_SECONDS * 1000);
-      const captchaUntil = new Date(Date.now() + 60 * 60 * 1000); // 1h
+      const captchaUntil = new Date(Date.now() + 60 * 60 * 1000);
       await repo.lockMobile(mobile, until, captchaUntil);
-      await redis.del(otpVerifyFail(mobile));
+      await store.deleteVerifyFail(mobile);
     }
-    await audit({ mobile, role: p.role, event: 'verify_failed', ip: p.ip });
+    await audit(deps.audit, { mobile, role: p.role, event: 'verify_failed', ip: p.ip });
     throw new AuthError('That code doesn\u2019t match.', AUTH_ERROR.OTP_INVALID);
   }
 
-  // 4. Single-use — delete session before we mint tokens
-  await redis.del(otpSession(p.requestId));
+  // 4. Single-use — delete session before minting tokens
+  await store.deleteOtpSession(p.requestId);
 
   // 5. Resolve user
   let user = await repo.findUserByPhone(p.role, mobile);
   if (!user) {
     if (p.role === 'customer') {
-      // Auto-create shell on first login
       user = await repo.createCustomerShell(mobile);
     } else {
       throw new ForbiddenError(
@@ -119,7 +120,7 @@ export async function verifyOtp(p: VerifyOtpParams): Promise<VerifyOtpResponseDt
 
   // 6. Status check
   if (user.status === 'suspended' || user.status === 'deleted') {
-    await audit({ mobile, role: p.role, event: 'verify_succeeded', ip: p.ip });
+    await audit(deps.audit, { mobile, role: p.role, event: 'verify_succeeded', ip: p.ip });
     await repo.insertLoginEvent({
       role: p.role,
       entityId: user.entityId,
@@ -157,16 +158,16 @@ export async function verifyOtp(p: VerifyOtpParams): Promise<VerifyOtpResponseDt
     userAgent: p.userAgent,
     expiresAt,
   });
-  await redis.sadd(sessionsActive(user.role, user.entityId), jti);
+  await store.addActiveSession(user.role, user.entityId, jti);
 
   // 8. Load profile
   const profile = await repo.loadProfile(user.role, user.entityId);
 
   // 9. Audit + reset fail counters
   await Promise.all([
-    audit({ mobile, role: p.role, event: 'verify_succeeded', ip: p.ip }),
+    audit(deps.audit, { mobile, role: p.role, event: 'verify_succeeded', ip: p.ip }),
     repo.resetVerifyFailure(mobile),
-    redis.del(otpVerifyFail(mobile)),
+    store.deleteVerifyFail(mobile),
     repo.insertLoginEvent({
       role: user.role,
       entityId: user.entityId,

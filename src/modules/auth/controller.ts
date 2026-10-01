@@ -2,13 +2,20 @@
  * ==============================================================================
  * auth — controller (HTTP glue only)
  * ==============================================================================
- * NO business logic. Reads validated req.body / req.headers, calls the service,
- * writes the response envelope. Errors bubble up to shared errorHandler.
+ * NO business logic. Reads validated req.body / req.headers, calls the service
+ * with the production deps bundle, writes the response envelope. Errors bubble
+ * up to shared errorHandler.
+ *
+ * DESIGN CHANGE (DIP fix):
+ *   Controllers import `authDeps` (the production singleton) and pass it as
+ *   the first argument to every service function. Nothing else in this file
+ *   imports any infrastructure directly.
  * ==============================================================================
  */
 import type { Request, Response } from 'express';
 import { ok, created, noContent, getIdentity } from '../../shared/http/responses.js';
 import { HEADER_IDEMPOTENCY_KEY } from '../../config/constants.js';
+import { authDeps } from './infrastructure/AuthContainer.js';
 import * as service from './service/index.js';
 import type { RequestOtpBody, VerifyOtpBody, RefreshBody, LogoutBody } from './schemas.js';
 
@@ -16,7 +23,7 @@ export async function postRequestOtp(req: Request, res: Response): Promise<Respo
   const body = req.body as RequestOtpBody;
   const idem = req.header(HEADER_IDEMPOTENCY_KEY) ?? null;
 
-  const out = await service.sendOtp({
+  const out = await service.sendOtp(authDeps, {
     phone: body.phone,
     countryCode: body.countryCode,
     role: body.role,
@@ -29,7 +36,7 @@ export async function postRequestOtp(req: Request, res: Response): Promise<Respo
 export async function postVerifyOtp(req: Request, res: Response): Promise<Response> {
   const body = req.body as VerifyOtpBody;
 
-  const out = await service.verifyOtp({
+  const out = await service.verifyOtp(authDeps, {
     phone: body.phone,
     countryCode: body.countryCode,
     role: body.role,
@@ -46,8 +53,6 @@ export async function postVerifyOtp(req: Request, res: Response): Promise<Respon
 export async function postRefresh(req: Request, res: Response): Promise<Response> {
   const body = req.body as RefreshBody;
 
-  // Refresh doesn't require a valid access token — the refresh token IS the
-  // authentication. Device metadata is best-effort (client may not send it).
   const device = extractDevice(req) ?? {
     id: 'unknown-device',
     name: 'Unknown device',
@@ -56,6 +61,7 @@ export async function postRefresh(req: Request, res: Response): Promise<Response
   };
 
   const out = await service.refreshSession(
+    authDeps,
     body.refreshToken,
     device,
     clientIp(req),
@@ -68,7 +74,7 @@ export async function postLogout(req: Request, res: Response): Promise<Response>
   const body = (req.body ?? {}) as LogoutBody;
   const identity = getIdentity(req);
 
-  await service.logout({
+  await service.logout(authDeps, {
     identityRole: identity.role,
     identityEntityId: identity.entityId,
     identitySessionId: identity.sessionId,
@@ -78,10 +84,9 @@ export async function postLogout(req: Request, res: Response): Promise<Response>
 }
 
 export async function getMe(req: Request, res: Response): Promise<Response> {
-  // authenticate middleware guarantees req.identity is populated.
   const identity = getIdentity(req);
 
-  const out = await service.getMe({
+  const out = await service.getMe(authDeps, {
     identityUserId: identity.userId,
     identityRole: identity.role,
     identitySubRole: identity.subRole,
@@ -89,7 +94,6 @@ export async function getMe(req: Request, res: Response): Promise<Response> {
     identitySessionId: identity.sessionId,
   });
 
-  // Identity is per-user; never cache at the HTTP layer.
   res.setHeader('Cache-Control', 'no-store');
   return ok(res, out);
 }
@@ -99,8 +103,6 @@ export async function getMe(req: Request, res: Response): Promise<Response> {
  * ----------------------------------------------------------------- */
 
 function clientIp(req: Request): string | null {
-  // Express with `trust proxy` populates req.ip correctly from
-  // X-Forwarded-For — set in security.ts / applySecurity.
   return req.ip ?? null;
 }
 

@@ -17,25 +17,30 @@
  *                                       attacker probing the endpoint cannot
  *                                       enumerate registered vendors/drivers/
  *                                       UC staff.
- *   4. Per-mobile rate limits          — Redis counters — apply to silent-
+ *   4. Per-mobile rate limits          — store counters — apply to silent-
  *                                       drops too so probes still burn quota,
  *                                       plus SMS-pumping caps: per-IP-block
  *                                       (IPv4 /24, IPv6 /64) and per-number-
  *                                       prefix (5-char) hourly windows.
  *                                       Skipped for test mobiles only.
- *   5. Generate OTP, hash, store in Redis session (silent-drop uses an
+ *   5. Generate OTP, hash, store in session store (silent-drop uses an
  *                                       unguessable random hash so verify
  *                                       never matches).
  *   6. MSG91 dispatch — SKIPPED for silent-drops and test mobiles.
- *   7. Insert otp_events row (via audit()).
+ *   7. Insert otp_events row (via audit sink).
  *   8. Bump send counters.
  *   9. Snapshot response for idempotency.
  *  10. Best-effort mobile_registry touch.
+ *
+ * DESIGN CHANGE (DIP fix):
+ *   Accepts AuthServiceDeps instead of importing the concrete redis /
+ *   repo singletons. All infrastructure access goes through:
+ *     deps.store  — IOtpSessionStore  (was: redis + key builders)
+ *     deps.repo   — IAuthRepository   (was: import * as repo)
+ *     deps.audit  — IAuditSink        (was: import { audit } + repo.insertOtpEvent)
  * ==============================================================================
  */
 import { randomInt, randomBytes } from 'node:crypto';
-import { redis } from '../../../shared/redis/client.js';
-import { otpSession, idempotencySnapshot } from '../../../shared/redis/keys.js';
 import {
   OTP_LENGTH,
   OTP_SESSION_TTL_SECONDS,
@@ -49,10 +54,10 @@ import { logger } from '../../../shared/logger/index.js';
 import { ForbiddenError, RateLimitError, ConflictError } from '../../../shared/errors/index.js';
 import { dispatchOtp } from '../../../shared/providers/msg91/otp.js';
 import { normalizeMobile, maskMobile } from '../../../shared/utils/phone.js';
-import * as repo from '../repository/index.js';
 import { AUTH_ERROR } from '../types.js';
 import type { OtpSession, RequestOtpResponseDto } from '../types.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
+import type { AuthServiceDeps } from '../infrastructure/AuthContainer.js';
 import { enforceSendRateLimits, incrementSendCounters } from './rate-limits.js';
 import { logDispatchFailure, throwDispatchError } from './dispatch-outcome.js';
 import { audit } from './audit.js';
@@ -76,19 +81,20 @@ const TEST_MOBILES: ReadonlySet<string> = new Set(
     .filter(Boolean),
 );
 
-export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> {
+export async function sendOtp(
+  deps: AuthServiceDeps,
+  p: SendOtpParams,
+): Promise<RequestOtpResponseDto> {
+  const { store, repo } = deps;
   const mobile = normalizeMobile(p.phone, p.countryCode);
   const isTest = TEST_MOBILES.has(mobile);
 
-  // 1. Idempotency snapshot — replay identical response for 24h.
-  //    Fingerprint is sha256('<mobile>|<role>') — no PII in the snapshot
-  //    itself, and a stolen key alone can't be used to enumerate mobiles.
+  // 1. Idempotency snapshot
   if (p.idempotencyKey) {
-    const snap = await redis.get(idempotencySnapshot(p.idempotencyKey));
+    const snap = await store.getIdempotencySnapshot(p.idempotencyKey);
     if (snap) {
-      const parsed = JSON.parse(snap) as { fp: string; response: RequestOtpResponseDto };
       const expectedFp = sha256(`${mobile}|${p.role}`);
-      if (parsed.fp !== expectedFp) {
+      if (snap.fp !== expectedFp) {
         logger.warn(
           {
             alarm: 'idempotency_key_mismatch',
@@ -104,19 +110,25 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
         );
       }
       logger.info({ key: p.idempotencyKey }, 'otp send: idempotent replay');
-      return parsed.response;
+      return snap.response;
     }
   }
 
   // 2. Mobile registry hard blocks
   const flags = await repo.getMobileFlags(mobile);
   if (flags?.admin_blocked === 1) {
-    await audit({ mobile, role: p.role, event: 'send_failed', ip: p.ip, msg: 'admin_blocked' });
+    await audit(deps.audit, {
+      mobile,
+      role: p.role,
+      event: 'send_failed',
+      ip: p.ip,
+      msg: 'admin_blocked',
+    });
     throw new ForbiddenError('This number cannot use the service.', AUTH_ERROR.MOBILE_BLOCKED);
   }
   if (flags?.verify_locked_until && flags.verify_locked_until > new Date()) {
     const retryAfter = Math.ceil((flags.verify_locked_until.getTime() - Date.now()) / 1000);
-    await audit({ mobile, role: p.role, event: 'rate_limited', ip: p.ip });
+    await audit(deps.audit, { mobile, role: p.role, event: 'rate_limited', ip: p.ip });
     throw new RateLimitError(
       'This number is locked after too many wrong attempts.',
       AUTH_ERROR.ACCOUNT_LOCKED,
@@ -125,7 +137,6 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
   }
 
   // 3. Non-customer role provisioning / status check — SILENT DROP on miss.
-  //    See top-of-file doc for the rationale.
   let silentDrop = false;
   let silentDropReason: 'not_provisioned' | 'suspended' | null = null;
   if (p.role !== 'customer') {
@@ -139,15 +150,10 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
     }
   }
 
-  // 4. Per-mobile rate limits + anti-pumping (subnet + prefix) caps
-  await enforceSendRateLimits(mobile, p.ip, isTest);
+  // 4. Per-mobile rate limits + anti-pumping caps
+  await enforceSendRateLimits(store, mobile, p.ip, isTest);
 
-  // 5. Generate OTP + Redis session.
-  //    For silent-drops we still create a session with the SAME shape as a
-  //    real one, but the stored hash is 32 random bytes hex-encoded — same
-  //    length as sha256 (so an attacker who somehow reads Redis can't tell
-  //    the difference) but cryptographically impossible to match with any
-  //    submitted OTP.
+  // 5. Generate OTP + session
   const requestId = newId();
   const otp = isTest ? ENV.MSG91_TEST_OTP : generateOtp();
   const otpHash = silentDrop ? randomBytes(32).toString('hex') : sha256(otp);
@@ -163,12 +169,9 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
     sentAt: Date.now(),
   };
 
-  await redis.set(otpSession(requestId), JSON.stringify(session), 'EX', OTP_SESSION_TTL_SECONDS);
+  await store.setOtpSession(session, OTP_SESSION_TTL_SECONDS);
 
-  // 6. Dispatch — three paths:
-  //      (a) silent-drop: skip MSG91 entirely; log an alarm for ops.
-  //      (b) test mobile: skip MSG91 (known QA numbers).
-  //      (c) real: dispatch via MSG91 Flow API.
+  // 6. Dispatch
   let providerRequestId: string | null = null;
   let attemptNumber = 1;
 
@@ -192,7 +195,7 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
 
     if (!dispatch.ok) {
       logDispatchFailure(mobile, p.role, dispatch);
-      await audit({
+      await audit(deps.audit, {
         mobile,
         role: p.role,
         event: 'send_failed',
@@ -207,8 +210,6 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
       throwDispatchError(dispatch);
     }
 
-    // Log a successful retry so operators can see transient hiccups without
-    // digging through failure logs.
     if (attemptNumber > 1) {
       logger.warn(
         {
@@ -222,8 +223,8 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
     }
   }
 
-  // 7. Insert audit event.
-  await audit({
+  // 7. Audit event
+  await audit(deps.audit, {
     mobile,
     role: p.role,
     event: silentDrop ? 'account_not_provisioned' : 'send_succeeded',
@@ -236,8 +237,8 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
     ...(silentDrop && silentDropReason ? { msg: silentDropReason } : {}),
   });
 
-  // 8. Update rate-limit counters (only on success — silent-drop counts as success here)
-  await incrementSendCounters(mobile, p.ip, isTest);
+  // 8. Rate-limit counter bump
+  await incrementSendCounters(store, mobile, p.ip, isTest);
 
   const response: RequestOtpResponseDto = {
     requestId,
@@ -246,16 +247,10 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
     testMode: isTest,
   };
 
-  // 9. Idempotency snapshot — store the response plus a fingerprint bound
-  //    to (mobile, role). Step 1's lookup rejects replays that don't match.
+  // 9. Idempotency snapshot
   if (p.idempotencyKey) {
     const fp = sha256(`${mobile}|${p.role}`);
-    await redis.set(
-      idempotencySnapshot(p.idempotencyKey),
-      JSON.stringify({ fp, response }),
-      'EX',
-      IDEMPOTENCY_TTL_SECONDS,
-    );
+    await store.setIdempotencySnapshot(p.idempotencyKey, { fp, response }, IDEMPOTENCY_TTL_SECONDS);
   }
 
   // 10. Best-effort mobile registry touch
@@ -269,7 +264,6 @@ export async function sendOtp(p: SendOtpParams): Promise<RequestOtpResponseDto> 
  * ============================================================================== */
 
 function generateOtp(): string {
-  // crypto.randomInt is cryptographically secure. Pad to OTP_LENGTH.
   const max = Math.pow(10, OTP_LENGTH);
   const min = Math.pow(10, OTP_LENGTH - 1);
   return String(randomInt(min, max));

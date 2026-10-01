@@ -2,20 +2,16 @@
  * ==============================================================================
  * auth.service — public surface
  * ==============================================================================
- * The controller still writes:
+ * Re-exports every service entry point. Each function now accepts
+ * AuthServiceDeps as its first argument so the service layer has zero
+ * hardwired infrastructure dependencies.
  *
- *   import * as service from './service/index.js';
- *   await service.sendOtp(...)
- *
- * The one-function-per-file split behind this barrel is an implementation
- * detail. If a caller only needs one entry point (e.g. a background job that
- * only refreshes sessions), it's fine to import directly from the leaf file
- * instead of pulling the whole barrel.
- *
- * Types are re-exported for consumers who want to type their call payloads
- * without a second import path.
+ * The controller imports `authDeps` from the container and threads it
+ * through. Tests build their own deps with in-memory fakes via
+ * buildAuthDeps({ repo, store, audit }).
  * ==============================================================================
  */
 export { sendOtp, type SendOtpParams } from './otp-send.js';
 export { verifyOtp, type VerifyOtpParams } from './otp-verify.js';
 export { refreshSession, logout, getMe, type LogoutParams, type GetMeParams } from './session.js';
+export { type AuditEventInput } from './audit.js';

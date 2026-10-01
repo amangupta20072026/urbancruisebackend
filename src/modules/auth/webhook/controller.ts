@@ -17,12 +17,16 @@
  *
  * A wrong `:token` DOES return 401 — that is not MSG91 talking to us, it is
  * an attacker probing. No retry storm concern.
+ *
+ * DESIGN NOTE (DIP):
+ *   Uses authDeps.repo to call applyDlr so the webhook shares the same
+ *   injectable repository as the rest of the auth module.
  * ==============================================================================
  */
 import type { Request, Response } from 'express';
 import { logger } from '../../../shared/logger/index.js';
 import { verifyWebhookToken, parseDlrPayload } from '../../../shared/providers/msg91/webhook.js';
-import { applyDlr } from '../repository/index.js';
+import { authDeps } from '../infrastructure/AuthContainer.js';
 
 type TokenParams = { token: string };
 
@@ -36,15 +40,10 @@ export async function postMsg91Dlr(req: Request<TokenParams>, res: Response): Pr
     return res.status(401).json({ error: { code: 'BAD_TOKEN', message: 'invalid webhook token' } });
   }
 
-  // 2. Parse whatever shape MSG91 sent. `req.body` may be a JSON object,
-  //    a JSON array, or an object with a `data` field carrying a JSON
-  //    string (legacy shape). parseDlrPayload handles all three.
+  // 2. Parse whatever shape MSG91 sent.
   const records = parseDlrPayload(req.body);
 
   if (records.length === 0) {
-    // Unrecognised shape — log the raw body for investigation and ack. Do
-    // NOT include the full body in production logs at info level; MSG91
-    // DLRs can contain phone numbers. Truncate + warn.
     logger.warn(
       { bodyKeys: safeKeys(req.body) },
       'msg91 DLR webhook: 0 records parsed from payload',
@@ -52,15 +51,14 @@ export async function postMsg91Dlr(req: Request<TokenParams>, res: Response): Pr
     return res.status(200).json({ ok: true, applied: 0 });
   }
 
-  // 3. Apply each DLR to its otp_events row. Errors on a single row must
-  //    NOT prevent processing of the others in the same push.
+  // 3. Apply each DLR. Errors on a single row must NOT block the rest.
   let applied = 0;
   let skipped = 0;
   let errored = 0;
 
   for (const rec of records) {
     try {
-      const rows = await applyDlr({
+      const rows = await authDeps.repo.applyDlr({
         msg91RequestId: rec.providerRequestId,
         dlr: rec.status,
         description: rec.description,
@@ -69,10 +67,6 @@ export async function postMsg91Dlr(req: Request<TokenParams>, res: Response): Pr
       if (rows === 1) {
         applied += 1;
       } else {
-        // 0 rows means either: unknown request id (send-row was never
-        // written; test-mobile paths bypass MSG91 entirely) OR row is
-        // already in a terminal state (duplicate/late DLR — idempotent
-        // no-op). Both are safe.
         skipped += 1;
       }
     } catch (err) {
@@ -84,8 +78,6 @@ export async function postMsg91Dlr(req: Request<TokenParams>, res: Response): Pr
     }
   }
 
-  // 4. Surface an operator-friendly summary. Aggregate a `failed` count too
-  //    so a monitoring rule ("failed:applied ratio spikes") can page.
   const summary = countByStatus(records);
   logger.info(
     { received: records.length, applied, skipped, errored, ...summary },

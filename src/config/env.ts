@@ -73,6 +73,28 @@ const schema = z.object({
 
   // ── Bcrypt ──────────────────────────────────────────────────────────────
   BCRYPT_COST: z.coerce.number().int().min(10).max(15).default(10),
+
+  // ── Role gate ──────────────────────────────────────────────────────────────────────────
+  // Comma-separated list of UserRole values allowed through the authenticate
+  // middleware. Any valid JWT whose role is NOT in this list is rejected with
+  // 403 ROLE_NOT_ENABLED.
+  //
+  // Default: 'customer' only (MVP). When a new role's features ship, add it
+  // here in the deployment config — no code change needed.
+  //
+  // Example .env entries:
+  //   ENABLED_ROLES=customer
+  //   ENABLED_ROLES=customer,vendor
+  //   ENABLED_ROLES=customer,vendor,driver,uc
+  ENABLED_ROLES: z
+    .string()
+    .default('customer')
+    .transform(s =>
+      s
+        .split(',')
+        .map(r => r.trim())
+        .filter(Boolean),
+    ),
 });
 
 const parsed = schema.safeParse(process.env);

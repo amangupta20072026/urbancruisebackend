@@ -5,11 +5,16 @@
  * Extracts `Authorization: Bearer <token>`, verifies via `verifyAccessToken`,
  * and populates `req.identity`. On failure throws AuthError (401).
  *
- * ROLE GUARD: only 'customer' is served today. A valid token with a
- * non-customer role is rejected with 403 `ROLE_NOT_ENABLED`. The type surface
- * of `UserRole` includes all four roles (JWT payloads carry them regardless);
- * this guard is where runtime scope narrows. When vendor / driver / uc
- * features ship, delete their role from ENABLED_ROLES.
+ * ROLE GUARD (OCP fix):
+ *   Previously, the set of enabled roles was a hardcoded constant inside this
+ *   file. Adding a new role required a code change + redeploy. This violates
+ *   OCP — the middleware should be closed for modification when new roles ship.
+ *
+ *   The set is now read from ENV.ENABLED_ROLES, which is parsed from the
+ *   ENABLED_ROLES environment variable (comma-separated, default 'customer').
+ *   To enable vendor features on a given deployment, set in .env:
+ *     ENABLED_ROLES=customer,vendor
+ *   No code changes, no redeployment of the middleware logic needed.
  *
  * Public / unauthenticated routes (like /health, /auth/*) simply don't mount
  * this middleware. Any route behind it is guaranteed to have `req.identity`.
@@ -17,6 +22,7 @@
  */
 import type { RequestHandler } from 'express';
 import { HEADER_AUTHORIZATION } from '../../../config/constants.js';
+import { ENV } from '../../../config/env.js';
 import { AuthError, ForbiddenError } from '../../errors/index.js';
 import { verifyAccessToken } from '../../auth/jwt.js';
 import type { Identity } from '../../types/identity.js';
@@ -27,10 +33,14 @@ import { jwtDeny } from '../../redis/keys.js';
 const BEARER_PREFIX = 'Bearer ';
 
 /**
- * Roles whose features are wired up server-side. Everything else gets 403 at
- * the auth boundary. Add roles here as their modules are implemented.
+ * Roles whose features are wired up server-side — read from ENV at startup.
+ * Configured via the ENABLED_ROLES environment variable (comma-separated).
+ * Default: 'customer'.
+ *
+ * Evaluated once at module load (same timing as the old hardcoded Set).
+ * No request-time overhead, no runtime config re-reads.
  */
-const ENABLED_ROLES = new Set<UserRole>(['customer']);
+const ENABLED_ROLES = new Set<UserRole>(ENV.ENABLED_ROLES as UserRole[]);
 
 export const authenticate: RequestHandler = async (req, _res, next) => {
   const header = req.header(HEADER_AUTHORIZATION);

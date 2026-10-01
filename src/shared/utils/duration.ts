@@ -42,8 +42,14 @@ export function ttlToSeconds(ttl: string): number {
       isOperational: false,
     });
   }
-  const n = Number(m[1]);
-  switch (m[2]) {
+  // m[1] is the unit suffix (ms|s|m|h|d). The numeric part is everything
+  // before it. Using parseInt on the full match minus the suffix is safe
+  // because durationRegex already guarantees the prefix is all digits.
+  // The non-null assertion is safe: the regex requires the capture group to
+  // match, so m[1] is always a string when exec() returns non-null.
+  const unit = m[1]!;
+  const n = parseInt(ttl.slice(0, ttl.length - unit.length), 10);
+  switch (unit) {
     case 'ms':
       return Math.max(1, Math.ceil(n / 1000));
     case 's':

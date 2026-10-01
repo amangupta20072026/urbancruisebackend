@@ -39,7 +39,7 @@ module.exports = {
       name: 'modules-only-import-siblings-index',
       severity: 'error',
       comment:
-        'Cross-module imports are only allowed via the target module\'s index.ts ' +
+        "Cross-module imports are only allowed via the target module's index.ts " +
         'public API. Anything else breaks encapsulation.',
       from: { path: '^src/modules/([^/]+)/' },
       to: {
@@ -51,10 +51,12 @@ module.exports = {
       name: 'sub-modules-siblings-forbidden',
       severity: 'error',
       comment:
-        'Sub-modules of the same parent must not import each other. The parent ' +
-        'index.ts composes them.',
+        'Business sub-modules of the same parent must not import each other. ' +
+        'The auth module is excluded because its second-level folders are ' +
+        'architectural layers, not peer business sub-modules.',
       from: {
         path: '^src/modules/([^/]+)/([^/]+)/',
+        pathNot: '^src/modules/auth/',
       },
       to: {
         path: '^src/modules/$1/(?!$2)([^/]+)/',

@@ -22,7 +22,7 @@
 import type { Request, Response } from 'express';
 import { logger } from '../../../shared/logger/index.js';
 import { verifyWebhookToken, parseDlrPayload } from '../../../shared/providers/msg91/webhook.js';
-import { applyDlr } from '../repository.js';
+import { applyDlr } from '../repository/index.js';
 
 type TokenParams = { token: string };
 

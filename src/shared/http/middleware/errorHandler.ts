@@ -7,11 +7,12 @@
  *   2. Anything else → 500 SERVER_ERROR. Stack logged, never returned.
  *   3. Log level: error for 5xx / non-operational; warn for 4xx.
  *   4. Includes the request-id so support can find the log line.
+ *   5. RateLimitError with `retryAfter` → emits standard Retry-After header.
  * ==============================================================================
  */
 import type { ErrorRequestHandler } from 'express';
 import { ENV } from '../../../config/env.js';
-import { AppError } from '../../errors/index.js';
+import { AppError, RateLimitError } from '../../errors/index.js';
 import { logger } from '../../logger/index.js';
 import type { ErrorEnvelope } from '../../types/api.js';
 
@@ -45,5 +46,13 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
   };
 
   if (res.headersSent) return; // response already partially written — bail.
+
+  // Standard header for 429 responses that carry a hint. Only set when the
+  // value is known — spec allows either seconds or an HTTP-date; we always
+  // emit integer seconds.
+  if (err instanceof RateLimitError && err.retryAfter !== undefined) {
+    res.setHeader('Retry-After', String(err.retryAfter));
+  }
+
   res.status(statusCode).json(envelope);
 };

@@ -11,12 +11,15 @@
  *
  * `dotenv` reads `.env` in dev; in prod, PM2 / systemd inject env directly and
  * .env is not present.
+ *
+ * NOTE: `durationRegex` is imported from shared/utils/duration.ts — that
+ * module also defines `ttlToSeconds` used by the auth service. One regex,
+ * one parser: keeps the two in lockstep.
  * ==============================================================================
  */
 import 'dotenv/config';
 import { z } from 'zod';
-
-const durationRegex = /^\d+(ms|s|m|h|d)$/;
+import { durationRegex } from '../shared/utils/duration.js';
 
 const secretSchema = z
   .string()
@@ -55,22 +58,10 @@ const schema = z.object({
   REDIS_PASSWORD: z.string().min(1),
 
   // ── MSG91 (SMS-only OTP transport) ──────────────────────────────────────
-  // MSG91_AUTH_KEY — server-side auth key. Never ship in the RN app.
   MSG91_AUTH_KEY: z.string().min(1),
-  // DLT-approved SMS template + pre-approved sender ID. The template must
-  // expose the OTP as the ##OTP## variable. Sender IDs are 3–11 alpha chars.
   MSG91_SMS_SENDER_ID: z.string().min(3).max(11),
   MSG91_SMS_TEMPLATE_ID: z.string().min(1),
-  // Shared secret embedded in the MSG91 DLR webhook URL path
-  // (/webhooks/msg91/<secret>/delivery). MSG91 does not sign DLR pushes,
-  // so possession of the URL authenticates the caller. Rotate by
-  // generating a new value and updating the URL in the MSG91 dashboard.
-  // 32 chars minimum ≈ 190 bits of entropy — infeasible to brute force
-  // even at MSG91's-portal rate.
   MSG91_WEBHOOK_SECRET: z.string().min(32),
-  // Comma-separated E.164 numbers that bypass MSG91 entirely and use
-  // MSG91_TEST_OTP. Kept in env so QA can add/remove without a deploy.
-  // Format: '919876543210,919000000001'
   MSG91_TEST_MOBILES: z.string().default(''),
   MSG91_TEST_OTP: z.string().regex(/^\d{6}$/),
 

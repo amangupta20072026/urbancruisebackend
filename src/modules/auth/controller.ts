@@ -9,7 +9,7 @@
 import type { Request, Response } from 'express';
 import { ok, created, noContent, getIdentity } from '../../shared/http/responses.js';
 import { HEADER_IDEMPOTENCY_KEY } from '../../config/constants.js';
-import * as service from './service.js';
+import * as service from './service/index.js';
 import type { RequestOtpBody, VerifyOtpBody, RefreshBody, LogoutBody } from './schemas.js';
 
 export async function postRequestOtp(req: Request, res: Response): Promise<Response> {

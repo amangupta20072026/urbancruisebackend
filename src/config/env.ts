@@ -28,7 +28,7 @@ const secretSchema = z
 const schema = z.object({
   // ── App ─────────────────────────────────────────────────────────────────
   NODE_ENV: z.enum(['development', 'production']).default('development'),
-  PORT: z.coerce.number().int().positive().max(65535).default(4000),
+  PORT: z.coerce.number().int().positive().max(65535).default(3001),
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
 
   // ── Reverse proxy ───────────────────────────────────────────────────────

@@ -8,7 +8,7 @@
 
 // ── App ──────────────────────────────────────────────────────────────────────
 process.env['NODE_ENV'] = 'development';
-process.env['PORT'] = '4000';
+process.env['PORT'] = '3001';
 process.env['LOG_LEVEL'] = 'error';
 
 // ── Reverse proxy ─────────────────────────────────────────────────────────────

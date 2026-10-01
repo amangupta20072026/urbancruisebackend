@@ -56,7 +56,7 @@ module.exports = {
         'architectural layers, not peer business sub-modules.',
       from: {
         path: '^src/modules/([^/]+)/([^/]+)/',
-        pathNot: '^src/modules/auth/',
+        pathNot: '^src/modules/(auth|notifications)/',
       },
       to: {
         path: '^src/modules/$1/(?!$2)([^/]+)/',

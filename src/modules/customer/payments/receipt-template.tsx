@@ -12,6 +12,17 @@
  *   • Security banner (lock icon)
  *   • Thank you footer + QR verification code
  *   • Dark footer bar: company name left, website right
+ *
+ * SRP FIX:
+ *   formatRupees / rupeesToWords / fmtDateTime extracted to
+ *   shared/utils/currency.ts — they are generic INR utilities, not
+ *   template-specific logic. The template is now purely presentational.
+ *
+ * DIP FIX:
+ *   Image loading (fs.readFileSync) is now LAZY — called inside renderReceipt()
+ *   rather than at module load time. Importing this file no longer touches the
+ *   filesystem, which makes it safe to import in tests and avoids a hard crash
+ *   when the assets folder is absent during CI or cold container starts.
  * ==============================================================================
  */
 
@@ -19,6 +30,7 @@ import React from 'react';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Document, Page, Text, View, Image, StyleSheet, Font } from '@react-pdf/renderer';
+import { formatRupees, rupeesToWords, fmtDateTime } from '../../../shared/utils/currency.js';
 
 /* ── Resolve assets directory ── */
 // process.cwd() = project root (where npm run dev is started).
@@ -26,6 +38,12 @@ import { Document, Page, Text, View, Image, StyleSheet, Font } from '@react-pdf/
 // started from the project root. The assets folder stays at src/assets.
 const ASSETS_DIR = path.join(process.cwd(), 'src', 'assets');
 
+/**
+ * Load an asset image as a base64 data URI.
+ * Called LAZILY inside renderReceipt() — not at module load time.
+ * Returns '' when the file is missing so the Image component simply
+ * doesn't render rather than crashing the process.
+ */
 function loadImage(filename: string): string {
   const p = path.join(ASSETS_DIR, filename);
   try {
@@ -34,19 +52,16 @@ function loadImage(filename: string): string {
     const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
     return `data:${mime};base64,${buf.toString('base64')}`;
   } catch {
-    return ''; // file not found — Image component will simply not render
+    return '';
   }
 }
 
-// Load at module init (cached for the process lifetime)
-const LOGO_URI = loadImage('ucwithtexthindi.png');
-
 /* ── Colours ── */
 const C = {
-  primary: '#1B5E37', // dark green — logo green
-  primaryLight: '#2E7D52', // header green
-  primaryTint: '#E8F5EE', // pale green backgrounds
-  successGreen: '#4CAF50', // checkmark circle
+  primary: '#1B5E37',
+  primaryLight: '#2E7D52',
+  primaryTint: '#E8F5EE',
+  successGreen: '#4CAF50',
   pillGreen: '#E8F5EE',
   pillText: '#2E7D52',
   white: '#FFFFFF',
@@ -56,7 +71,7 @@ const C = {
   textLight: '#6B7280',
   border: '#E0E0E0',
   divider: '#EEEEEE',
-  footerBg: '#1A2340', // dark navy footer
+  footerBg: '#1A2340',
 };
 
 Font.registerHyphenationCallback(word => [word]);
@@ -69,8 +84,6 @@ const s = StyleSheet.create({
     paddingHorizontal: 0,
     fontSize: 10,
   },
-
-  /* ── Top white header area ── */
   headerArea: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -81,37 +94,11 @@ const s = StyleSheet.create({
   },
   logo: { width: 140, height: 52, objectFit: 'contain' },
   headerRight: { alignItems: 'flex-end' },
-  headerTitle: {
-    fontSize: 18,
-    fontFamily: 'Helvetica-Bold',
-    color: C.textDark,
-  },
-  headerRcptNo: {
-    fontSize: 10,
-    color: C.primary,
-    fontFamily: 'Helvetica-Bold',
-    marginTop: 3,
-  },
-  headerDate: {
-    fontSize: 8,
-    color: C.textLight,
-    marginTop: 3,
-    textAlign: 'right',
-  },
-  headerComputer: {
-    fontSize: 8,
-    color: C.textLight,
-    textAlign: 'right',
-  },
-
-  dividerLine: {
-    height: 1,
-    backgroundColor: C.border,
-    marginHorizontal: 36,
-    marginBottom: 20,
-  },
-
-  /* ── Hero green banner ── */
+  headerTitle: { fontSize: 18, fontFamily: 'Helvetica-Bold', color: C.textDark },
+  headerRcptNo: { fontSize: 10, color: C.primary, fontFamily: 'Helvetica-Bold', marginTop: 3 },
+  headerDate: { fontSize: 8, color: C.textLight, marginTop: 3, textAlign: 'right' },
+  headerComputer: { fontSize: 8, color: C.textLight, textAlign: 'right' },
+  dividerLine: { height: 1, backgroundColor: C.border, marginHorizontal: 36, marginBottom: 20 },
   heroBanner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -130,21 +117,10 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  heroCheck: {
-    fontSize: 24,
-    color: C.white,
-    fontFamily: 'Helvetica-Bold',
-  },
+  heroCheck: { fontSize: 24, color: C.white, fontFamily: 'Helvetica-Bold' },
   heroRight: { flex: 1 },
-  heroTitle: {
-    fontSize: 18,
-    fontFamily: 'Helvetica-Bold',
-    color: C.primaryLight,
-    marginBottom: 4,
-  },
+  heroTitle: { fontSize: 18, fontFamily: 'Helvetica-Bold', color: C.primaryLight, marginBottom: 4 },
   heroSub: { fontSize: 9.5, color: C.textMid, marginBottom: 1 },
-
-  /* ── Amount card ── */
   amountCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -158,19 +134,9 @@ const s = StyleSheet.create({
   },
   amountLeft: {},
   amtLabel: { fontSize: 9, color: C.textLight, marginBottom: 5 },
-  amtValue: {
-    fontSize: 30,
-    fontFamily: 'Helvetica-Bold',
-    color: C.primary,
-    marginBottom: 3,
-  },
+  amtValue: { fontSize: 30, fontFamily: 'Helvetica-Bold', color: C.primary, marginBottom: 3 },
   amtWords: { fontSize: 8, color: C.textLight },
-  amountDivider: {
-    width: 1,
-    height: 60,
-    backgroundColor: C.border,
-    marginHorizontal: 16,
-  },
+  amountDivider: { width: 1, height: 60, backgroundColor: C.border, marginHorizontal: 16 },
   amountRight: { alignItems: 'flex-end' },
   statusLabel: { fontSize: 9, color: C.textLight, marginBottom: 6 },
   statusPill: {
@@ -179,20 +145,9 @@ const s = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 5,
   },
-  statusPillText: {
-    fontSize: 11,
-    fontFamily: 'Helvetica-Bold',
-    color: C.pillText,
-  },
-
-  /* ── Payment Details section ── */
+  statusPillText: { fontSize: 11, fontFamily: 'Helvetica-Bold', color: C.pillText },
   section: { marginHorizontal: 36, marginBottom: 20 },
-  sectionTitle: {
-    fontSize: 13,
-    fontFamily: 'Helvetica-Bold',
-    color: C.textDark,
-    marginBottom: 10,
-  },
+  sectionTitle: { fontSize: 13, fontFamily: 'Helvetica-Bold', color: C.textDark, marginBottom: 10 },
   tableRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -222,8 +177,6 @@ const s = StyleSheet.create({
     textAlign: 'right',
     maxWidth: '60%',
   },
-
-  /* ── Security banner ── */
   securityBanner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -244,15 +197,8 @@ const s = StyleSheet.create({
   },
   lockIcon: { fontSize: 15, color: C.white },
   securityText: { flex: 1 },
-  securityBold: {
-    fontSize: 8.5,
-    fontFamily: 'Helvetica-Bold',
-    color: C.textDark,
-    marginBottom: 2,
-  },
+  securityBold: { fontSize: 8.5, fontFamily: 'Helvetica-Bold', color: C.textDark, marginBottom: 2 },
   securitySub: { fontSize: 8, color: C.textLight },
-
-  /* ── Thank you + QR footer ── */
   thankYouArea: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -261,12 +207,7 @@ const s = StyleSheet.create({
     marginBottom: 24,
   },
   thankYouLeft: {},
-  thankYouTitle: {
-    fontSize: 13,
-    fontFamily: 'Helvetica-Bold',
-    color: C.primary,
-    marginBottom: 3,
-  },
+  thankYouTitle: { fontSize: 13, fontFamily: 'Helvetica-Bold', color: C.primary, marginBottom: 3 },
   thankYouSub: { fontSize: 8.5, color: C.textLight },
   qrArea: { alignItems: 'center' },
   qrPlaceholder: {
@@ -279,8 +220,6 @@ const s = StyleSheet.create({
     justifyContent: 'center',
   },
   qrText: { fontSize: 6, color: C.textLight, marginTop: 4, textAlign: 'center' },
-
-  /* ── Dark navy footer bar ── */
   footerBar: {
     backgroundColor: C.footerBg,
     flexDirection: 'row',
@@ -290,94 +229,10 @@ const s = StyleSheet.create({
     paddingVertical: 14,
   },
   footerLeft: {},
-  footerCompany: {
-    fontSize: 9,
-    fontFamily: 'Helvetica-Bold',
-    color: C.white,
-    marginBottom: 2,
-  },
+  footerCompany: { fontSize: 9, fontFamily: 'Helvetica-Bold', color: C.white, marginBottom: 2 },
   footerTagline: { fontSize: 7.5, color: '#9CA3AF' },
   footerWebsite: { fontSize: 9, color: '#9CA3AF' },
 });
-
-/* ── Number helpers ── */
-
-function formatRupees(n: number): string {
-  return `\u20B9${n.toLocaleString('en-IN')}`;
-}
-
-function rupeesToWords(amount: number): string {
-  if (!Number.isFinite(amount) || amount < 0) return '';
-  const n = Math.floor(amount);
-  if (n === 0) return 'Rupees Zero Only';
-  const ones = [
-    '',
-    'One',
-    'Two',
-    'Three',
-    'Four',
-    'Five',
-    'Six',
-    'Seven',
-    'Eight',
-    'Nine',
-    'Ten',
-    'Eleven',
-    'Twelve',
-    'Thirteen',
-    'Fourteen',
-    'Fifteen',
-    'Sixteen',
-    'Seventeen',
-    'Eighteen',
-    'Nineteen',
-  ];
-  const tens = [
-    '',
-    '',
-    'Twenty',
-    'Thirty',
-    'Forty',
-    'Fifty',
-    'Sixty',
-    'Seventy',
-    'Eighty',
-    'Ninety',
-  ];
-  const two = (x: number): string =>
-    x < 20
-      ? (ones[x] ?? '')
-      : (tens[Math.floor(x / 10)] ?? '') + (x % 10 ? ' ' + (ones[x % 10] ?? '') : '');
-  const three = (x: number): string => {
-    const h = Math.floor(x / 100),
-      r = x % 100,
-      p: string[] = [];
-    if (h) p.push(`${ones[h] ?? ''} Hundred`);
-    if (r) p.push(two(r));
-    return p.join(' ');
-  };
-  const cr = Math.floor(n / 10000000);
-  const lakh = Math.floor((n % 10000000) / 100000);
-  const thou = Math.floor((n % 100000) / 1000);
-  const rem = n % 1000;
-  const p: string[] = [];
-  if (cr) p.push(`${two(cr)} Crore`);
-  if (lakh) p.push(`${two(lakh)} Lakh`);
-  if (thou) p.push(`${two(thou)} Thousand`);
-  if (rem) p.push(three(rem));
-  return `Rupees ${p.join(' ')} Only`;
-}
-
-function fmtDt(iso: string): string {
-  return new Date(iso).toLocaleString('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: true,
-  });
-}
 
 /* ── ReceiptData ── */
 
@@ -394,9 +249,12 @@ export type ReceiptData = {
   generatedAt: string;
 };
 
-/* ── Document ── */
+/* ── Document component ── */
 
-export const ReceiptDocument: React.FC<{ data: ReceiptData }> = ({ data }) => (
+export const ReceiptDocument: React.FC<{ data: ReceiptData; logoUri: string }> = ({
+  data,
+  logoUri,
+}) => (
   <Document
     title={`Urban Cruise Receipt – ${data.receiptNumber}`}
     author="Urban Cruise"
@@ -408,8 +266,8 @@ export const ReceiptDocument: React.FC<{ data: ReceiptData }> = ({ data }) => (
       {/* ── Header: logo left, receipt info right ── */}
       <View style={s.headerArea}>
         <View>
-          {LOGO_URI ? (
-            <Image style={s.logo} src={LOGO_URI} />
+          {logoUri ? (
+            <Image style={s.logo} src={logoUri} />
           ) : (
             <Text style={{ fontSize: 18, fontFamily: 'Helvetica-Bold', color: C.primary }}>
               Urban Cruise
@@ -419,7 +277,7 @@ export const ReceiptDocument: React.FC<{ data: ReceiptData }> = ({ data }) => (
         <View style={s.headerRight}>
           <Text style={s.headerTitle}>Payment Receipt</Text>
           <Text style={s.headerRcptNo}>#{data.receiptNumber}</Text>
-          <Text style={s.headerDate}>Generated on: {fmtDt(data.generatedAt)}</Text>
+          <Text style={s.headerDate}>Generated on: {fmtDateTime(data.generatedAt)}</Text>
           <Text style={s.headerComputer}>This is a computer generated receipt.</Text>
         </View>
       </View>
@@ -457,7 +315,6 @@ export const ReceiptDocument: React.FC<{ data: ReceiptData }> = ({ data }) => (
       {/* ── Payment Details ── */}
       <View style={s.section}>
         <Text style={s.sectionTitle}>Payment Details</Text>
-
         <View style={s.tableRow}>
           <Text style={s.tableLabel}>Payment Method</Text>
           <Text style={s.tableValue}>{data.paymentMethod}</Text>
@@ -472,7 +329,7 @@ export const ReceiptDocument: React.FC<{ data: ReceiptData }> = ({ data }) => (
         </View>
         <View style={s.tableRow}>
           <Text style={s.tableLabel}>Paid On</Text>
-          <Text style={s.tableValue}>{fmtDt(data.paymentEventAt)}</Text>
+          <Text style={s.tableValue}>{fmtDateTime(data.paymentEventAt)}</Text>
         </View>
         <View style={s.tableRow}>
           <Text style={s.tableLabel}>Vehicle</Text>
@@ -504,7 +361,6 @@ export const ReceiptDocument: React.FC<{ data: ReceiptData }> = ({ data }) => (
           <Text style={s.thankYouSub}>Safe Journeys. A Better Tomorrow.</Text>
         </View>
         <View style={s.qrArea}>
-          {/* QR placeholder — replace with real QR image when available */}
           <View style={s.qrPlaceholder}>
             <Text style={{ fontSize: 18, color: C.textLight }}>▦</Text>
           </View>
@@ -524,8 +380,17 @@ export const ReceiptDocument: React.FC<{ data: ReceiptData }> = ({ data }) => (
   </Document>
 );
 
+/**
+ * Render a receipt PDF to a Buffer.
+ *
+ * Image loading happens HERE, not at module load time (DIP fix).
+ * Importing this module no longer touches the filesystem — safe in tests
+ * and during container cold-starts where src/assets may be absent.
+ */
 export async function renderReceipt(data: ReceiptData): Promise<Buffer> {
   const { renderToBuffer } = await import('@react-pdf/renderer');
-  const element = <ReceiptDocument data={data} />;
+  // Lazy: load image only when an actual render is requested.
+  const logoUri = loadImage('ucwithtexthindi.png');
+  const element = <ReceiptDocument data={data} logoUri={logoUri} />;
   return renderToBuffer(element);
 }

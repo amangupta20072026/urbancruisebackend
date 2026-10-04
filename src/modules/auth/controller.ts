@@ -17,7 +17,13 @@ import { ok, created, noContent, getIdentity } from '../../shared/http/responses
 import { HEADER_IDEMPOTENCY_KEY } from '../../config/constants.js';
 import { authDeps } from './infrastructure/AuthContainer.js';
 import * as service from './service/index.js';
-import type { RequestOtpBody, VerifyOtpBody, RefreshBody, LogoutBody } from './schemas.js';
+import type {
+  RequestOtpBody,
+  VerifyOtpBody,
+  RefreshBody,
+  LogoutBody,
+  CustomerOnboardBody,
+} from './schemas.js';
 
 export async function postRequestOtp(req: Request, res: Response): Promise<Response> {
   const body = req.body as RequestOtpBody;
@@ -46,7 +52,26 @@ export async function postVerifyOtp(req: Request, res: Response): Promise<Respon
     ip: clientIp(req),
     userAgent: req.header('user-agent') ?? null,
   });
-  // 201 semantically — a new session was created.
+  res.setHeader('Cache-Control', 'no-store');
+  // 201 when a session was created; 200 when the client must onboard first.
+  return out.status === 'authenticated' ? created(res, out) : ok(res, out);
+}
+
+export async function postCustomerOnboard(req: Request, res: Response): Promise<Response> {
+  const body = req.body as CustomerOnboardBody;
+
+  const out = await service.completeCustomerOnboarding(authDeps, {
+    onboardingToken: body.onboardingToken,
+    details: {
+      firstName: body.firstName,
+      lastName: body.lastName ?? null,
+      email: body.email ?? null,
+    },
+    device: body.device,
+    ip: clientIp(req),
+    userAgent: req.header('user-agent') ?? null,
+  });
+  res.setHeader('Cache-Control', 'no-store');
   return created(res, out);
 }
 
@@ -67,6 +92,7 @@ export async function postRefresh(req: Request, res: Response): Promise<Response
     clientIp(req),
     req.header('user-agent') ?? null,
   );
+  res.setHeader('Cache-Control', 'no-store');
   return ok(res, out);
 }
 

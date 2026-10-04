@@ -97,3 +97,10 @@ export const healthMsg91Wallet = (): string => 'health:msg91:wallet';
  * ----------------------------------------------------------------- */
 
 export const circuitBreakerMsg91Sms = (): string => 'cb:msg91:sms';
+
+/* -----------------------------------------------------------------
+ * Customer onboarding ticket — issued after a NEW customer verifies their
+ * OTP, consumed (atomically, single-use) by POST /auth/customer/onboard.
+ * Keyed by sha256(token) so a Redis dump never exposes a usable token.
+ * ----------------------------------------------------------------- */
+export const onboardingTicket = (tokenHash: string): string => `auth:onboard:${tokenHash}`;

@@ -60,6 +60,7 @@ export async function lockMobile(mobile: string, until: Date, captchaUntil: Date
     `INSERT INTO mobile_registry (mobile, verify_locked_until, captcha_required_until)
          VALUES (?, ?, ?)
      ON DUPLICATE KEY UPDATE
+       verify_failure_count   = 0,
        verify_locked_until    = VALUES(verify_locked_until),
        captcha_required_until = VALUES(captcha_required_until)`,
     [mobile, until, captchaUntil],

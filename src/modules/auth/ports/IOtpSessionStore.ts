@@ -36,7 +36,7 @@
  * ==============================================================================
  */
 
-import type { OtpSession, RequestOtpResponseDto } from '../types.js';
+import type { OtpSession, RequestOtpResponseDto, OnboardingTicket } from '../types.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
 
 /* --------------------------------------------------------------------------
@@ -207,4 +207,16 @@ export interface IOtpSessionStore {
    * token-reuse detection to revoke every active access token at once).
    */
   denyMandySessions(jtis: string[], ttlSeconds: number): Promise<void>;
+
+  // ── Customer onboarding tickets ───────────────────────────────────────────
+
+  /** Store a ticket under sha256(token). */
+  setOnboardingTicket(
+    tokenHash: string,
+    ticket: OnboardingTicket,
+    ttlSeconds: number,
+  ): Promise<void>;
+
+  /** Atomically read AND delete the ticket (single use). null when missing/expired. */
+  takeOnboardingTicket(tokenHash: string): Promise<OnboardingTicket | null>;
 }

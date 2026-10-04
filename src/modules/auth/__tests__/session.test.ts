@@ -54,6 +54,16 @@ const DEVICE = { id: 'dev-1', name: 'iPhone', platform: 'ios' as const, appVersi
  * refreshSession
  * -------------------------------------------------------------------------- */
 
+const ACTIVE_CUSTOMER_42 = {
+  mobile: '919812345678',
+  role: 'customer' as const,
+  entityId: '42',
+  userId: '42',
+  subRole: null,
+  status: 'active' as const,
+  requiresProfileSetup: false,
+};
+
 describe('refreshSession', () => {
   let store: InMemoryOtpSessionStore;
   let repo: InMemoryAuthRepository;
@@ -61,6 +71,7 @@ describe('refreshSession', () => {
   beforeEach(() => {
     store = new InMemoryOtpSessionStore();
     repo = new InMemoryAuthRepository();
+    repo.seedUser(ACTIVE_CUSTOMER_42);
   });
 
   it('returns new access and refresh tokens', async () => {
@@ -163,6 +174,80 @@ describe('refreshSession', () => {
     await expect(refreshSession(deps, 'not.a.jwt', DEVICE, null, null)).rejects.toBeInstanceOf(
       AuthError,
     );
+  });
+
+  // ── Account re-validation (web app shares the DB) ──────────────────────
+
+  it('rejects refresh and revokes ALL sessions when the account became inactive', async () => {
+    const token = signRefreshToken({ sub: '42', jti: 'jti-old' });
+    repo.seedSession(baseSessionRow({ refresh_token_hash: hashForStorage(token) }));
+    repo.seedSession(baseSessionRow({ jti: 'jti-tablet', refresh_token_hash: 'h2' }));
+    repo.setUserStatus('customer', '42', 'inactive');
+
+    const deps = buildAuthDeps({ store, repo, audit: new NoopAuditSink() });
+    await expect(refreshSession(deps, token, DEVICE, null, null)).rejects.toMatchObject({
+      code: 'account_suspended',
+      statusCode: 403,
+    });
+    expect(repo.revokedSessions.map(r => r.jti).sort()).toEqual(['jti-old', 'jti-tablet']);
+    expect(repo.revokedSessions.every(r => r.reason === 'admin_force')).toBe(true);
+    expect(store.isDenied('jti-tablet')).toBe(true);
+    expect(repo.createdSessions).toHaveLength(0);
+  });
+
+  it('rejects refresh with SESSION_ORPHANED when the account row was deleted', async () => {
+    const token = signRefreshToken({ sub: '42', jti: 'jti-old' });
+    repo.seedSession(baseSessionRow({ refresh_token_hash: hashForStorage(token) }));
+    repo.setUserStatus('customer', '42', 'gone');
+
+    const deps = buildAuthDeps({ store, repo, audit: new NoopAuditSink() });
+    await expect(refreshSession(deps, token, DEVICE, null, null)).rejects.toMatchObject({
+      code: 'session_orphaned',
+    });
+  });
+
+  it('a UC staff member marked "left" in the web app loses access at next refresh', async () => {
+    repo.seedUser({ ...ACTIVE_CUSTOMER_42, role: 'uc', entityId: '8', userId: '8' });
+    const token = signRefreshToken({ sub: '8', jti: 'jti-uc' });
+    repo.seedSession(
+      baseSessionRow({
+        jti: 'jti-uc',
+        role: 'uc',
+        entity_id: '8',
+        refresh_token_hash: hashForStorage(token),
+      }),
+    );
+    repo.setUserStatus('uc', '8', 'inactive');
+
+    const deps = buildAuthDeps({ store, repo, audit: new NoopAuditSink() });
+    await expect(refreshSession(deps, token, DEVICE, null, null)).rejects.toMatchObject({
+      code: 'account_suspended',
+    });
+  });
+
+  it('rejects a refresh token whose subject does not own the session', async () => {
+    const token = signRefreshToken({ sub: '999', jti: 'jti-old' });
+    repo.seedSession(baseSessionRow({ refresh_token_hash: hashForStorage(token) }));
+    const deps = buildAuthDeps({ store, repo, audit: new NoopAuditSink() });
+    await expect(refreshSession(deps, token, DEVICE, null, null)).rejects.toMatchObject({
+      code: 'refresh_invalid',
+    });
+  });
+
+  // ── Concurrency ─────────────────────────────────────────────────────────
+
+  it('two concurrent refreshes with the same token: exactly one succeeds', async () => {
+    const token = signRefreshToken({ sub: '42', jti: 'jti-old' });
+    repo.seedSession(baseSessionRow({ refresh_token_hash: hashForStorage(token) }));
+    const deps = buildAuthDeps({ store, repo, audit: new NoopAuditSink() });
+
+    const results = await Promise.allSettled([
+      refreshSession(deps, token, DEVICE, null, null),
+      refreshSession(deps, token, DEVICE, null, null),
+    ]);
+    expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
+    // Only ONE new session exists — the chain never forks
+    expect(repo.createdSessions).toHaveLength(1);
   });
 });
 
@@ -298,5 +383,20 @@ describe('getMe', () => {
     }).catch(() => null);
 
     expect(store.isDenied('jti-orphan')).toBe(true);
+  });
+
+  it('throws ACCOUNT_SUSPENDED and deny-lists the caller when the account is inactive', async () => {
+    repo.setUserStatus('customer', '42', 'inactive');
+    const deps = buildAuthDeps({ store, repo, audit: new NoopAuditSink() });
+    await expect(
+      getMe(deps, {
+        identityUserId: '42',
+        identityRole: 'customer',
+        identitySubRole: null,
+        identityEntityId: '42',
+        identitySessionId: 'jti-live',
+      }),
+    ).rejects.toMatchObject({ code: 'account_suspended' });
+    expect(store.isDenied('jti-live')).toBe(true);
   });
 });

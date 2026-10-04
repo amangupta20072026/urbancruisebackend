@@ -14,18 +14,24 @@
 import type { RowDataPacket } from 'mysql2/promise';
 import { pool } from '../../../shared/db/pool.js';
 import type { ResolvedUser, UserProfileDto } from '../types.js';
-import { candidateFormats, joinName, normalisePhoneToE164, placeholder } from './users-shared.js';
+import {
+  candidateFormats,
+  placeholders,
+  joinName,
+  normalisePhoneToE164,
+  placeholder,
+} from './users-shared.js';
 
 /* --------------------------------------------------------------------------
  * DB row shape
  * -------------------------------------------------------------------------- */
 type DriverRow = RowDataPacket & {
   id: number;
-  phone: string;
+  phone: string | null;
   first_name: string | null;
   last_name: string | null;
   email: string | null;
-  created_at: Date;
+  created_at: Date | null;
 };
 
 /* --------------------------------------------------------------------------
@@ -37,7 +43,8 @@ export async function findDriverByPhone(mobile: string): Promise<ResolvedUser | 
   const [rows] = await pool.execute<DriverRow[]>(
     `SELECT id, phone
        FROM drivers
-      WHERE phone IN (?, ?, ?)
+      WHERE phone IN (${placeholders(fmts)})
+      ORDER BY id ASC
       LIMIT 1`,
     fmts,
   );
@@ -54,6 +61,17 @@ export async function findDriverByPhone(mobile: string): Promise<ResolvedUser | 
 }
 
 /* --------------------------------------------------------------------------
+ * Status by id — `drivers` has no status column: exists ⇒ active.
+ * -------------------------------------------------------------------------- */
+export async function getDriverStatusById(id: string): Promise<ResolvedUser['status'] | null> {
+  const [rows] = await pool.execute<RowDataPacket[]>(
+    'SELECT id FROM drivers WHERE id = ? LIMIT 1',
+    [id],
+  );
+  return rows.length ? 'active' : null;
+}
+
+/* --------------------------------------------------------------------------
  * Profile loaders
  * -------------------------------------------------------------------------- */
 export async function loadDriverProfile(id: string): Promise<UserProfileDto> {
@@ -64,14 +82,14 @@ export async function loadDriverProfile(id: string): Promise<UserProfileDto> {
   );
   if (!rows.length) return placeholder(id);
   const r = rows[0]!;
-  const phone = normalisePhoneToE164(r.phone);
+  const phone = normalisePhoneToE164(r.phone ?? '');
   return {
     id: String(r.id),
     displayName: joinName(r.first_name, r.last_name) || 'Driver',
     email: r.email ?? null,
     phoneIndia: phone,
     phoneGlobal: phone,
-    memberSince: r.created_at.toISOString(),
+    memberSince: (r.created_at ?? new Date()).toISOString(),
   };
 }
 

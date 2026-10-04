@@ -16,9 +16,14 @@
 
 import type { IAuthRepository } from '../ports/IAuthRepository.js';
 import type { MobileFlags } from '../repository/mobile-registry.js';
-import type { ResolvedUser, UserProfileDto, AuthSessionRow } from '../types.js';
+import type {
+  ResolvedUser,
+  UserProfileDto,
+  AuthSessionRow,
+  CustomerOnboardingDetails,
+} from '../types.js';
 import type { OtpEventInsert, LoginEventInsert, DlrUpdate } from '../repository/audit.js';
-import type { CreateSessionInput } from '../repository/sessions.js';
+import type { CreateSessionInput, RevokeReason } from '../repository/sessions.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
 
 // Existing repository functions — imported individually so the adapter stays
@@ -33,7 +38,8 @@ import {
 
 import {
   findUserByPhone,
-  createCustomerShell,
+  createCustomerIfAbsent,
+  getAccountStatus,
   loadProfile,
   loadIdentityDetails,
 } from '../repository/users.js';
@@ -77,8 +83,15 @@ export class MysqlAuthRepository implements IAuthRepository {
     return findUserByPhone(role, mobile);
   }
 
-  createCustomerShell(mobile: string): Promise<ResolvedUser> {
-    return createCustomerShell(mobile);
+  createCustomerIfAbsent(
+    mobile: string,
+    details: CustomerOnboardingDetails,
+  ): Promise<{ user: ResolvedUser; created: boolean }> {
+    return createCustomerIfAbsent(mobile, details);
+  }
+
+  getAccountStatus(role: UserRole, entityId: string): Promise<ResolvedUser['status'] | null> {
+    return getAccountStatus(role, entityId);
   }
 
   // ── profiles ─────────────────────────────────────────────────────────────
@@ -104,15 +117,15 @@ export class MysqlAuthRepository implements IAuthRepository {
     return findSessionByJti(jti);
   }
 
-  markSessionRevoked(jti: string, reason: string): Promise<void> {
+  markSessionRevoked(jti: string, reason: RevokeReason): Promise<void> {
     return markSessionRevoked(jti, reason);
   }
 
-  revokeAllForEntity(role: UserRole, entityId: string, reason: string): Promise<string[]> {
+  revokeAllForEntity(role: UserRole, entityId: string, reason: RevokeReason): Promise<string[]> {
     return revokeAllForEntity(role, entityId, reason);
   }
 
-  rotateSession(oldJti: string, next: CreateSessionInput): Promise<void> {
+  rotateSession(oldJti: string, next: CreateSessionInput): Promise<boolean> {
     return rotateSession(oldJti, next);
   }
 

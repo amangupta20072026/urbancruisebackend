@@ -24,7 +24,7 @@
  */
 
 import type { IOtpSessionStore, IdempotencySnapshot } from '../../ports/IOtpSessionStore.js';
-import type { OtpSession } from '../../types.js';
+import type { OtpSession, OnboardingTicket } from '../../types.js';
 import type { UserRole } from '../../../../shared/rbac/roles.js';
 
 export class InMemoryOtpSessionStore implements IOtpSessionStore {
@@ -40,6 +40,7 @@ export class InMemoryOtpSessionStore implements IOtpSessionStore {
   readonly verifyFails = new Map<string, number>();
   readonly deniedSids = new Set<string>();
   readonly activeSessions = new Map<string, Set<string>>(); // `${role}:${entityId}` → Set<jti>
+  readonly onboardingTickets = new Map<string, OnboardingTicket>(); // key: sha256(token)
 
   // ── Seed helpers (test use only) ─────────────────────────────────────────
 
@@ -66,6 +67,7 @@ export class InMemoryOtpSessionStore implements IOtpSessionStore {
     this.verifyFails.clear();
     this.deniedSids.clear();
     this.activeSessions.clear();
+    this.onboardingTickets.clear();
   }
 
   // ── IOtpSessionStore implementation ─────────────────────────────────────
@@ -169,5 +171,19 @@ export class InMemoryOtpSessionStore implements IOtpSessionStore {
 
   async denyMandySessions(jtis: string[], _ttlSeconds: number): Promise<void> {
     for (const sid of jtis) this.deniedSids.add(sid);
+  }
+
+  async setOnboardingTicket(
+    tokenHash: string,
+    ticket: OnboardingTicket,
+    _ttlSeconds: number,
+  ): Promise<void> {
+    this.onboardingTickets.set(tokenHash, ticket);
+  }
+
+  async takeOnboardingTicket(tokenHash: string): Promise<OnboardingTicket | null> {
+    const t = this.onboardingTickets.get(tokenHash) ?? null;
+    this.onboardingTickets.delete(tokenHash);
+    return t;
   }
 }

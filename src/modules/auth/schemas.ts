@@ -44,7 +44,7 @@ export const VerifyOtpBody = z.object({
   phone: IndianPhoneSchema,
   countryCode: CountryCodeSchema,
   role: RoleSchema,
-  otp: z.string().regex(/^\d{4,6}$/, 'OTP must be 4-6 digits'),
+  otp: z.string().regex(/^\d{6}$/, 'OTP must be 6 digits'),
   requestId: z.string().min(1).max(128).optional(),
   device: DeviceMetaSchema,
 });
@@ -71,3 +71,37 @@ export const LogoutBody = z.object({
   scope: z.enum(['current', 'all']).default('current'),
 });
 export type LogoutBody = z.infer<typeof LogoutBody>;
+
+/* -----------------------------------------------------------------
+ * POST /auth/customer/onboard — minimum details for a NEW customer.
+ * Lengths match the `customers` columns (firstName/lastName varchar(50),
+ * customerEmail varchar(100)).
+ * ----------------------------------------------------------------- */
+const NAME_RE = /^[\p{L}][\p{L}\p{M} .'-]*$/u;
+
+const optionalTrimmed = (max: number) =>
+  z
+    .string()
+    .trim()
+    .max(max)
+    .optional()
+    .nullable()
+    .transform(v => (v ? v : null));
+
+export const CustomerOnboardBody = z.object({
+  onboardingToken: z.string().min(20).max(200),
+  firstName: z
+    .string()
+    .trim()
+    .min(1, 'first name is required')
+    .max(50)
+    .regex(NAME_RE, 'first name contains invalid characters'),
+  lastName: optionalTrimmed(50).refine(v => v === null || NAME_RE.test(v), {
+    message: 'last name contains invalid characters',
+  }),
+  email: optionalTrimmed(100).refine(v => v === null || z.email().safeParse(v).success, {
+    message: 'invalid email address',
+  }),
+  device: DeviceMetaSchema,
+});
+export type CustomerOnboardBody = z.infer<typeof CustomerOnboardBody>;

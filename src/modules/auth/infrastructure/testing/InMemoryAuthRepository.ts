@@ -36,8 +36,13 @@ import type {
   DlrUpdate,
 } from '../../ports/IAuthRepository.js';
 import type { MobileFlags } from '../../repository/mobile-registry.js';
-import type { ResolvedUser, UserProfileDto, AuthSessionRow } from '../../types.js';
-import type { CreateSessionInput } from '../../repository/sessions.js';
+import type {
+  ResolvedUser,
+  UserProfileDto,
+  AuthSessionRow,
+  CustomerOnboardingDetails,
+} from '../../types.js';
+import type { CreateSessionInput, RevokeReason } from '../../repository/sessions.js';
 import type { UserRole } from '../../../../shared/rbac/roles.js';
 
 /* --------------------------------------------------------------------------
@@ -73,6 +78,7 @@ export class InMemoryAuthRepository implements IAuthRepository {
   readonly dlrUpdates: DlrUpdate[] = [];
   readonly createdSessions: CreateSessionInput[] = [];
   readonly revokedSessions: Array<{ jti: string; reason: string }> = [];
+  readonly createdCustomers: Array<{ mobile: string; details: CustomerOnboardingDetails }> = [];
 
   // ── Seeded state ─────────────────────────────────────────────────────────
 
@@ -117,6 +123,7 @@ export class InMemoryAuthRepository implements IAuthRepository {
     this.dlrUpdates.length = 0;
     this.createdSessions.length = 0;
     this.revokedSessions.length = 0;
+    this.createdCustomers.length = 0;
     this._users.clear();
     this._mobileFlags.clear();
     this._sessions.clear();
@@ -154,7 +161,7 @@ export class InMemoryAuthRepository implements IAuthRepository {
     const existing = this._mobileFlags.get(mobile);
     this._mobileFlags.set(mobile, {
       mobile,
-      verify_failure_count: existing?.verify_failure_count ?? 0,
+      verify_failure_count: 0, // mirrors SQL: locking resets the counter
       verify_locked_until: until,
       captcha_required_until: captchaUntil,
       admin_blocked: existing?.admin_blocked ?? 0,
@@ -177,7 +184,12 @@ export class InMemoryAuthRepository implements IAuthRepository {
     return this._users.get(`${role}:${mobile}`) ?? null;
   }
 
-  async createCustomerShell(mobile: string): Promise<ResolvedUser> {
+  async createCustomerIfAbsent(
+    mobile: string,
+    details: CustomerOnboardingDetails,
+  ): Promise<{ user: ResolvedUser; created: boolean }> {
+    const existing = this._users.get(`customer:${mobile}`);
+    if (existing) return { user: existing, created: false };
     const entityId = String(this._nextCustomerId++);
     const user: SeedUser = {
       mobile,
@@ -186,10 +198,26 @@ export class InMemoryAuthRepository implements IAuthRepository {
       userId: entityId,
       subRole: null,
       status: 'active',
-      requiresProfileSetup: true,
+      requiresProfileSetup: false,
     };
     this._users.set(`customer:${mobile}`, user);
-    return user;
+    this.createdCustomers.push({ mobile, details });
+    return { user, created: true };
+  }
+
+  /** Test helper: change a seeded user's status (simulates a web-app edit). */
+  setUserStatus(role: UserRole, entityId: string, status: ResolvedUser['status'] | 'gone'): void {
+    for (const [k, u] of this._users) {
+      if (u.role === role && u.entityId === entityId) {
+        if (status === 'gone') this._users.delete(k);
+        else this._users.set(k, { ...u, status });
+      }
+    }
+  }
+
+  async getAccountStatus(role: UserRole, entityId: string): Promise<ResolvedUser['status'] | null> {
+    const u = [...this._users.values()].find(x => x.role === role && x.entityId === entityId);
+    return u ? u.status : null;
   }
 
   // profiles
@@ -238,7 +266,7 @@ export class InMemoryAuthRepository implements IAuthRepository {
     return this._sessions.get(jti) ?? null;
   }
 
-  async markSessionRevoked(jti: string, reason: string): Promise<void> {
+  async markSessionRevoked(jti: string, reason: RevokeReason): Promise<void> {
     this.revokedSessions.push({ jti, reason });
     const row = this._sessions.get(jti);
     if (row) {
@@ -246,7 +274,11 @@ export class InMemoryAuthRepository implements IAuthRepository {
     }
   }
 
-  async revokeAllForEntity(role: UserRole, entityId: string, reason: string): Promise<string[]> {
+  async revokeAllForEntity(
+    role: UserRole,
+    entityId: string,
+    reason: RevokeReason,
+  ): Promise<string[]> {
     const jtis: string[] = [];
     for (const [jti, row] of this._sessions) {
       if (row.role === role && row.entity_id === entityId && row.revoked_at === null) {
@@ -258,9 +290,12 @@ export class InMemoryAuthRepository implements IAuthRepository {
     return jtis;
   }
 
-  async rotateSession(oldJti: string, next: CreateSessionInput): Promise<void> {
+  async rotateSession(oldJti: string, next: CreateSessionInput): Promise<boolean> {
+    const row = this._sessions.get(oldJti);
+    if (!row || row.revoked_at !== null) return false;
     await this.markSessionRevoked(oldJti, 'rotation');
     await this.createSession(next);
+    return true;
   }
 
   // audit

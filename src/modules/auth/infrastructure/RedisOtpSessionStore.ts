@@ -11,7 +11,7 @@
  */
 
 import type { IOtpSessionStore, IdempotencySnapshot } from '../ports/IOtpSessionStore.js';
-import type { OtpSession } from '../types.js';
+import type { OtpSession, OnboardingTicket } from '../types.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
 import { redis } from '../../../shared/redis/client.js';
 import {
@@ -25,6 +25,7 @@ import {
   otpVerifyFail,
   jwtDeny,
   sessionsActive,
+  onboardingTicket,
 } from '../../../shared/redis/keys.js';
 
 export class RedisOtpSessionStore implements IOtpSessionStore {
@@ -162,5 +163,23 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
   async denyMandySessions(jtis: string[], ttlSeconds: number): Promise<void> {
     if (jtis.length === 0) return;
     await Promise.all(jtis.map(sid => redis.set(jwtDeny(sid), '1', 'EX', ttlSeconds)));
+  }
+
+  // ── Customer onboarding tickets ──────────────────────────────────────────
+
+  async setOnboardingTicket(
+    tokenHash: string,
+    ticket: OnboardingTicket,
+    ttlSeconds: number,
+  ): Promise<void> {
+    await redis.set(onboardingTicket(tokenHash), JSON.stringify(ticket), 'EX', ttlSeconds);
+  }
+
+  async takeOnboardingTicket(tokenHash: string): Promise<OnboardingTicket | null> {
+    // MULTI/EXEC = atomic GET+DEL; works on every Redis version (GETDEL needs 6.2+).
+    const k = onboardingTicket(tokenHash);
+    const res = await redis.multi().get(k).del(k).exec();
+    const raw = res?.[0]?.[1];
+    return typeof raw === 'string' ? (JSON.parse(raw) as OnboardingTicket) : null;
   }
 }

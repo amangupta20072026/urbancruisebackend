@@ -11,22 +11,25 @@
  *                                       rather than replaying someone else's
  *                                       response.
  *   2. Mobile registry hard blocks    — admin block, lock, captcha.
- *   3. Non-customer role check        — SILENT-DROP on unprovisioned or
- *                                       suspended accounts. Response DTO is
- *                                       identical to a real send so an
- *                                       attacker probing the endpoint cannot
- *                                       enumerate registered vendors/drivers/
- *                                       UC staff.
- *   4. Per-mobile rate limits          — store counters — apply to silent-
- *                                       drops too so probes still burn quota,
- *                                       plus SMS-pumping caps: per-IP-block
- *                                       (IPv4 /24, IPv6 /64) and per-number-
- *                                       prefix (5-char) hourly windows.
- *                                       Skipped for test mobiles only.
- *   5. Generate OTP, hash, store in session store (silent-drop uses an
- *                                       unguessable random hash so verify
- *                                       never matches).
- *   6. MSG91 dispatch — SKIPPED for silent-drops and test mobiles.
+ *   3. Rate limits                     — per-mobile + SMS-pumping caps
+ *                                       (IP block, number prefix). Checked
+ *                                       BEFORE the account lookup so the
+ *                                       lookup itself is throttled.
+ *   4. Vendor / UC / Driver gate       — the account MUST already exist in
+ *                                       its table and be active. Otherwise
+ *                                       403 ACCOUNT_NOT_PROVISIONED /
+ *                                       ACCOUNT_SUSPENDED with a clear
+ *                                       message, and NO SMS is sent. The
+ *                                       rejected attempt still burns rate-
+ *                                       limit quota, which caps how fast
+ *                                       anyone can probe which numbers are
+ *                                       registered.
+ *                                       Customers are NOT checked here: new
+ *                                       and existing customers both receive
+ *                                       an OTP, so this endpoint reveals
+ *                                       nothing about customer accounts.
+ *   5. Generate OTP, HMAC it, store the session.
+ *   6. MSG91 dispatch — skipped for test mobiles.
  *   7. Insert otp_events row (via audit sink).
  *   8. Bump send counters.
  *   9. Snapshot response for idempotency.
@@ -40,7 +43,7 @@
  *     deps.audit  — IAuditSink        (was: import { audit } + repo.insertOtpEvent)
  * ==============================================================================
  */
-import { randomInt, randomBytes } from 'node:crypto';
+import { randomInt } from 'node:crypto';
 import {
   OTP_LENGTH,
   OTP_SESSION_TTL_SECONDS,
@@ -59,6 +62,7 @@ import type { OtpSession, RequestOtpResponseDto } from '../types.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
 import type { AuthServiceDeps } from '../infrastructure/AuthContainer.js';
 import { enforceSendRateLimits, incrementSendCounters } from './rate-limits.js';
+import { hashOtp } from './otp-hash.js';
 import { logDispatchFailure, throwDispatchError } from './dispatch-outcome.js';
 import { audit } from './audit.js';
 
@@ -136,32 +140,51 @@ export async function sendOtp(
     );
   }
 
-  // 3. Non-customer role provisioning / status check — SILENT DROP on miss.
-  let silentDrop = false;
-  let silentDropReason: 'not_provisioned' | 'suspended' | null = null;
+  // 3. Rate limits (before the account lookup, so probing is throttled)
+  await enforceSendRateLimits(store, mobile, p.ip, isTest);
+
+  // 4. Vendor / UC / Driver must be a pre-existing, active account.
   if (p.role !== 'customer') {
-    const exists = await repo.findUserByPhone(p.role, mobile);
-    if (!exists) {
-      silentDrop = true;
-      silentDropReason = 'not_provisioned';
-    } else if (exists.status === 'suspended' || exists.status === 'deleted') {
-      silentDrop = true;
-      silentDropReason = 'suspended';
+    const account = await repo.findUserByPhone(p.role, mobile);
+    if (!account || account.status !== 'active') {
+      const reason = account ? 'inactive' : 'not_provisioned';
+      // Burn quota so this endpoint can't be used as a free lookup oracle.
+      await incrementSendCounters(store, mobile, p.ip, isTest);
+      await audit(deps.audit, {
+        mobile,
+        role: p.role,
+        event: 'account_not_provisioned',
+        ip: p.ip,
+        msg: reason,
+      });
+      logger.info(
+        { role: p.role, mobile: maskMobile(mobile), reason },
+        'otp send: rejected — no active account for this role',
+      );
+      if (!account) {
+        throw new ForbiddenError(
+          `This number is not registered as ${ROLE_LABEL[p.role]} with Urban Cruise. ` +
+            'Please contact your Urban Cruise administrator.',
+          AUTH_ERROR.ACCOUNT_NOT_PROVISIONED,
+          { role: p.role },
+        );
+      }
+      throw new ForbiddenError(
+        'This account is not active. Please contact your Urban Cruise administrator.',
+        AUTH_ERROR.ACCOUNT_SUSPENDED,
+        { role: p.role },
+      );
     }
   }
-
-  // 4. Per-mobile rate limits + anti-pumping caps
-  await enforceSendRateLimits(store, mobile, p.ip, isTest);
 
   // 5. Generate OTP + session
   const requestId = newId();
   const otp = isTest ? ENV.MSG91_TEST_OTP : generateOtp();
-  const otpHash = silentDrop ? randomBytes(32).toString('hex') : sha256(otp);
 
   const session: OtpSession = {
     requestId,
     mobile,
-    otpHash,
+    otpHash: hashOtp(requestId, otp),
     role: p.role,
     channel: 'sms',
     isTest,
@@ -175,18 +198,7 @@ export async function sendOtp(
   let providerRequestId: string | null = null;
   let attemptNumber = 1;
 
-  if (silentDrop) {
-    logger.warn(
-      {
-        alarm: 'otp_silent_drop',
-        reason: silentDropReason,
-        role: p.role,
-        mobile: maskMobile(mobile),
-        ip: p.ip,
-      },
-      'otp send: silent drop (enumeration protection) — no SMS sent',
-    );
-  } else if (isTest) {
+  if (isTest) {
     logger.warn({ mobile: maskMobile(mobile) }, 'otp send: TEST MODE (no real SMS)');
   } else {
     const dispatch = await dispatchOtp(mobile, otp);
@@ -227,14 +239,13 @@ export async function sendOtp(
   await audit(deps.audit, {
     mobile,
     role: p.role,
-    event: silentDrop ? 'account_not_provisioned' : 'send_succeeded',
+    event: 'send_succeeded',
     channel: isTest ? 'test' : 'sms',
     providerRequestId,
     attemptNumber,
     idempotencyKey: p.idempotencyKey,
     isTest,
     ip: p.ip,
-    ...(silentDrop && silentDropReason ? { msg: silentDropReason } : {}),
   });
 
   // 8. Rate-limit counter bump
@@ -262,6 +273,12 @@ export async function sendOtp(
 /* ==============================================================================
  * Local helpers
  * ============================================================================== */
+
+const ROLE_LABEL: Record<Exclude<UserRole, 'customer'>, string> = {
+  vendor: 'a vendor',
+  driver: 'a driver',
+  uc: 'Urban Cruise staff',
+};
 
 function generateOtp(): string {
   const max = Math.pow(10, OTP_LENGTH);

@@ -31,7 +31,8 @@ import type { UserRole } from '../../../shared/rbac/roles.js';
 
 export {
   findCustomerByPhone,
-  createCustomerShell,
+  createCustomerIfAbsent,
+  getCustomerStatusById,
   loadCustomerProfile,
   loadCustomerIdentityDetails,
 } from './users-customers.js';
@@ -58,21 +59,25 @@ export {
 
 import {
   findCustomerByPhone,
+  getCustomerStatusById,
   loadCustomerProfile,
   loadCustomerIdentityDetails,
 } from './users-customers.js';
 import {
   findVendorByPhone,
+  getVendorStatusById,
   loadVendorProfile,
   loadVendorIdentityDetails,
 } from './users-vendors.js';
 import {
   findDriverByPhone,
+  getDriverStatusById,
   loadDriverProfile,
   loadDriverIdentityDetails,
 } from './users-drivers.js';
 import {
   findUcStaffByPhone,
+  getUcStaffStatusById,
   loadUcStaffProfile,
   loadUcStaffIdentityDetails,
 } from './users-uc-staff.js';
@@ -123,5 +128,26 @@ export async function loadIdentityDetails(
       return loadDriverIdentityDetails(entityId);
     case 'uc':
       return loadUcStaffIdentityDetails(entityId);
+  }
+}
+
+/**
+ * Current login status of an already-known account (by tenant id).
+ * Returns null when the row no longer exists. Used on refresh and /me so
+ * accounts disabled from the web app lose mobile access promptly.
+ */
+export async function getAccountStatus(
+  role: UserRole,
+  entityId: string,
+): Promise<ResolvedUser['status'] | null> {
+  switch (role) {
+    case 'customer':
+      return getCustomerStatusById(entityId);
+    case 'vendor':
+      return getVendorStatusById(entityId);
+    case 'driver':
+      return getDriverStatusById(entityId);
+    case 'uc':
+      return getUcStaffStatusById(entityId);
   }
 }

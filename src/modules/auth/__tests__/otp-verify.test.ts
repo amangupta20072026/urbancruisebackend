@@ -13,10 +13,10 @@ import {
   InMemoryAuthRepository,
   SpyAuditSink,
 } from '../infrastructure/testing/index.js';
-import { sha256 } from '../../../shared/utils/crypto.js';
+import { hashOtp } from '../service/otp-hash.js';
 import { RateLimitError } from '../../../shared/errors/index.js';
 import { VERIFY_FAIL_LOCK_THRESHOLD } from '../../../config/constants.js';
-import type { OtpSession } from '../types.js';
+import type { OtpSession, VerifyOtpResponseDto, AuthenticatedResponseDto } from '../types.js';
 
 /* --------------------------------------------------------------------------
  * Shared test fixtures
@@ -26,7 +26,6 @@ const MOBILE_10 = '9812345678'; // 10-digit as client sends
 const MOBILE_E164 = '919812345678'; // internal normalised form
 const COUNTRY_CODE = '+91' as const;
 const OTP = '654321';
-const OTP_HASH = sha256(OTP);
 const REQUEST_ID = 'test-request-id-001';
 
 const DEVICE = {
@@ -37,10 +36,11 @@ const DEVICE = {
 };
 
 function makeSession(overrides: Partial<OtpSession> = {}): OtpSession {
+  const requestId = overrides.requestId ?? REQUEST_ID;
   return {
-    requestId: REQUEST_ID,
+    requestId,
     mobile: MOBILE_E164,
-    otpHash: OTP_HASH,
+    otpHash: hashOtp(requestId, OTP),
     role: 'customer',
     channel: 'sms',
     isTest: false,
@@ -62,6 +62,11 @@ function makeParams(overrides: Record<string, unknown> = {}) {
     userAgent: 'UrbanCruise/1.0',
     ...overrides,
   };
+}
+
+function asAuthenticated(r: VerifyOtpResponseDto): AuthenticatedResponseDto {
+  if (r.status !== 'authenticated') throw new Error(`expected authenticated, got ${r.status}`);
+  return r;
 }
 
 /* --------------------------------------------------------------------------
@@ -95,8 +100,9 @@ describe('verifyOtp', () => {
 
   it('returns tokens and profile on valid OTP', async () => {
     const deps = buildAuthDeps({ store, repo, audit: auditSink });
-    const result = await verifyOtp(deps, makeParams());
+    const result = asAuthenticated(await verifyOtp(deps, makeParams()));
 
+    expect(result.status).toBe('authenticated');
     expect(result.accessToken).toBeTypeOf('string');
     expect(result.refreshToken).toBeTypeOf('string');
     expect(result.role).toBe('customer');
@@ -152,17 +158,43 @@ describe('verifyOtp', () => {
     expect(flags?.verify_failure_count).toBe(0);
   });
 
-  // ── Auto-provision customer ───────────────────────────────────────────────
+  // ── New customer → onboarding (NO account created) ──────────────────────
 
-  it('auto-provisions a new customer on first login', async () => {
-    // No user seeded — findUserByPhone returns null
+  it('returns onboarding_required for a new customer and creates NOTHING', async () => {
     repo.reset();
     store.seedOtpSession(makeSession());
     const deps = buildAuthDeps({ store, repo, audit: auditSink });
 
     const result = await verifyOtp(deps, makeParams());
-    expect(result.requiresProfileSetup).toBe(true);
-    expect(repo.createdSessions).toHaveLength(1);
+    expect(result.status).toBe('onboarding_required');
+    if (result.status !== 'onboarding_required') return;
+    expect(result.onboardingToken.length).toBeGreaterThanOrEqual(40);
+    expect(result.expiresInSeconds).toBeGreaterThan(0);
+    // No customer row, no session, no tokens
+    expect(repo.createdCustomers).toHaveLength(0);
+    expect(repo.createdSessions).toHaveLength(0);
+    expect('accessToken' in result).toBe(false);
+  });
+
+  it('stores the onboarding ticket hashed, bound to mobile + device', async () => {
+    repo.reset();
+    store.seedOtpSession(makeSession());
+    const deps = buildAuthDeps({ store, repo, audit: auditSink });
+    const result = await verifyOtp(deps, makeParams());
+    if (result.status !== 'onboarding_required') throw new Error('expected onboarding');
+
+    expect(store.onboardingTickets.size).toBe(1);
+    const [key, ticket] = [...store.onboardingTickets.entries()][0]!;
+    expect(key).not.toBe(result.onboardingToken); // stored as a hash
+    expect(ticket.mobile).toBe(MOBILE_E164);
+    expect(ticket.deviceId).toBe(DEVICE.id);
+  });
+
+  it('existing customer goes straight to authenticated (no onboarding)', async () => {
+    const deps = buildAuthDeps({ store, repo, audit: auditSink });
+    const result = await verifyOtp(deps, makeParams());
+    expect(result.status).toBe('authenticated');
+    expect(store.onboardingTickets.size).toBe(0);
   });
 
   // ── Missing/expired OTP session ───────────────────────────────────────────
@@ -209,10 +241,8 @@ describe('verifyOtp', () => {
   });
 
   it('locks mobile and clears Redis counter after crossing threshold', async () => {
-    // Pre-seed failure count at threshold - 1 so next wrong attempt crosses it
-    repo.seedMobileFlags(MOBILE_E164, {
-      verify_failure_count: VERIFY_FAIL_LOCK_THRESHOLD - 1,
-    });
+    // Windowed Redis counter is the authority: seed threshold - 1
+    store.verifyFails.set(MOBILE_E164, VERIFY_FAIL_LOCK_THRESHOLD - 1);
 
     // Seed multiple OTP sessions so we can retry
     for (let i = 0; i < VERIFY_FAIL_LOCK_THRESHOLD; i++) {
@@ -229,6 +259,31 @@ describe('verifyOtp', () => {
     expect(flags?.verify_locked_until).toBeInstanceOf(Date);
     // Redis counter is cleared after lock
     expect(store.verifyFails.get(MOBILE_E164)).toBeUndefined();
+  });
+
+  it('resets the DB failure count when locking (no permanent hair-trigger)', async () => {
+    repo.seedMobileFlags(MOBILE_E164, { verify_failure_count: 40 });
+    store.verifyFails.set(MOBILE_E164, VERIFY_FAIL_LOCK_THRESHOLD - 1);
+    const deps = buildAuthDeps({ store, repo, audit: auditSink });
+    await verifyOtp(deps, makeParams({ otp: '000000' })).catch(() => null);
+    const flags = await repo.getMobileFlags(MOBILE_E164);
+    expect(flags?.verify_failure_count).toBe(0);
+  });
+
+  it('a stale DB failure count alone does NOT lock the number', async () => {
+    repo.seedMobileFlags(MOBILE_E164, { verify_failure_count: 40 });
+    const deps = buildAuthDeps({ store, repo, audit: auditSink });
+    await verifyOtp(deps, makeParams({ otp: '000000' })).catch(() => null);
+    const flags = await repo.getMobileFlags(MOBILE_E164);
+    expect(flags?.verify_locked_until).toBeNull();
+  });
+
+  it('rejects a correct OTP replayed against a different requestId', async () => {
+    store.sessions.clear();
+    // Session whose hash was computed for another request id
+    store.seedOtpSession({ ...makeSession(), otpHash: hashOtp('other-request', OTP) });
+    const deps = buildAuthDeps({ store, repo, audit: auditSink });
+    await expect(verifyOtp(deps, makeParams())).rejects.toMatchObject({ code: 'otp_invalid' });
   });
 
   // ── Mobile locked ─────────────────────────────────────────────────────────
@@ -270,7 +325,7 @@ describe('verifyOtp', () => {
 
   // ── Suspended / deleted account ───────────────────────────────────────────
 
-  it('throws ACCOUNT_SUSPENDED for a suspended customer', async () => {
+  it('throws ACCOUNT_SUSPENDED for an inactive account', async () => {
     repo.reset();
     store.seedOtpSession(makeSession());
     repo.seedUser({
@@ -279,7 +334,7 @@ describe('verifyOtp', () => {
       entityId: '99',
       userId: '99',
       subRole: null,
-      status: 'suspended',
+      status: 'inactive',
       requiresProfileSetup: false,
     });
     const deps = buildAuthDeps({ store, repo, audit: auditSink });
@@ -297,7 +352,7 @@ describe('verifyOtp', () => {
       entityId: '99',
       userId: '99',
       subRole: null,
-      status: 'suspended',
+      status: 'inactive',
       requiresProfileSetup: false,
     });
     const deps = buildAuthDeps({ store, repo, audit: auditSink });
@@ -318,14 +373,33 @@ describe('verifyOtp', () => {
     });
   });
 
-  // ── requiresProfileSetup flag propagates ─────────────────────────────────
+  it('never creates a vendor/driver/uc account', async () => {
+    for (const role of ['vendor', 'driver', 'uc'] as const) {
+      store.sessions.clear();
+      store.seedOtpSession(makeSession({ role }));
+      const deps = buildAuthDeps({ store, repo, audit: auditSink });
+      await verifyOtp(deps, makeParams({ role })).catch(() => null);
+    }
+    expect(repo.createdCustomers).toHaveLength(0);
+    expect(repo.createdSessions).toHaveLength(0);
+    expect(store.onboardingTickets.size).toBe(0);
+  });
 
-  it('sets requiresProfileSetup=true for a new customer', async () => {
-    repo.reset();
-    store.seedOtpSession(makeSession());
-    // auto-provision path
+  it('logs in an existing active vendor', async () => {
+    store.sessions.clear();
+    store.seedOtpSession(makeSession({ role: 'vendor' }));
+    repo.seedUser({
+      mobile: MOBILE_E164,
+      role: 'vendor',
+      entityId: '7',
+      userId: '7',
+      subRole: 'owner',
+      status: 'active',
+      requiresProfileSetup: false,
+    });
     const deps = buildAuthDeps({ store, repo, audit: auditSink });
-    const result = await verifyOtp(deps, makeParams());
-    expect(result.requiresProfileSetup).toBe(true);
+    const result = asAuthenticated(await verifyOtp(deps, makeParams({ role: 'vendor' })));
+    expect(result.role).toBe('vendor');
+    expect(result.subRole).toBe('owner');
   });
 });

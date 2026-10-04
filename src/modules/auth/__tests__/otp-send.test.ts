@@ -120,9 +120,10 @@ describe('sendOtp', () => {
     const deps = buildAuthDeps({ store, repo, audit: auditSink });
     const result = await sendOtp(deps, makeParams({ phone: '9000000000' }));
     const session = store.sessions.get(result.requestId);
-    // The hash should be sha256 of '123456' (MSG91_TEST_OTP from setup.ts)
-    const { sha256 } = await import('../../../shared/utils/crypto.js');
-    expect(session?.otpHash).toBe(sha256('123456'));
+    // HMAC of '123456' (MSG91_TEST_OTP from setup.ts) bound to this requestId
+    const { hashOtp } = await import('../service/otp-hash.js');
+    expect(session?.otpHash).toBe(hashOtp(result.requestId, '123456'));
+    expect(session?.otpHash).not.toContain('123456');
   });
 
   // ── Idempotency ───────────────────────────────────────────────────────────
@@ -181,30 +182,85 @@ describe('sendOtp', () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  // ── Silent drop (non-customer role not provisioned) ───────────────────────
+  // ── Vendor / UC / Driver must pre-exist (explicit rejection) ─────────────
 
-  it('silently drops an unprovisioned vendor (does not 401, returns same shape)', async () => {
-    // No vendor seeded in repo
+  for (const role of ['vendor', 'driver', 'uc'] as const) {
+    it(`rejects an unregistered ${role} with ACCOUNT_NOT_PROVISIONED and sends no SMS`, async () => {
+      const deps = buildAuthDeps({ store, repo, audit: auditSink });
+      await expect(sendOtp(deps, makeParams({ role }))).rejects.toMatchObject({
+        code: 'account_not_provisioned',
+        statusCode: 403,
+      });
+      expect(mockDispatch).not.toHaveBeenCalled();
+      expect(store.sessions.size).toBe(0);
+    });
+  }
+
+  it('the rejection message tells the user to contact the administrator', async () => {
     const deps = buildAuthDeps({ store, repo, audit: auditSink });
-    const result = await sendOtp(deps, makeParams({ role: 'vendor' }));
+    const err = (await sendOtp(deps, makeParams({ role: 'driver' })).catch(e => e)) as Error;
+    expect(err.message).toMatch(/not registered as a driver/i);
+    expect(err.message).toMatch(/administrator/i);
+  });
 
-    // Response shape is identical to a real send — attacker cannot enumerate
-    expect(result.requestId).toBeTypeOf('string');
-    expect(result.channel).toBe('sms');
-    // MSG91 was NOT called
+  it('rejects an INACTIVE vendor (e.g. web app deactivated it) with ACCOUNT_SUSPENDED', async () => {
+    repo.seedUser({
+      mobile: '919812345678',
+      role: 'vendor',
+      entityId: '5',
+      userId: '5',
+      subRole: 'owner',
+      status: 'inactive',
+      requiresProfileSetup: false,
+    });
+    const deps = buildAuthDeps({ store, repo, audit: auditSink });
+    await expect(sendOtp(deps, makeParams({ role: 'vendor' }))).rejects.toMatchObject({
+      code: 'account_suspended',
+    });
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  it('emits account_not_provisioned audit event on silent drop', async () => {
+  it('sends an OTP to a registered, active UC staff member', async () => {
+    repo.seedUser({
+      mobile: '919812345678',
+      role: 'uc',
+      entityId: '3',
+      userId: '3',
+      subRole: null,
+      status: 'active',
+      requiresProfileSetup: false,
+    });
     const deps = buildAuthDeps({ store, repo, audit: auditSink });
-    await sendOtp(deps, makeParams({ role: 'vendor' }));
+    const res = await sendOtp(deps, makeParams({ role: 'uc' }));
+    expect(res.requestId).toBeTypeOf('string');
+    expect(mockDispatch).toHaveBeenCalledOnce();
+  });
+
+  it('emits account_not_provisioned audit event on rejection', async () => {
+    const deps = buildAuthDeps({ store, repo, audit: auditSink });
+    await sendOtp(deps, makeParams({ role: 'vendor' })).catch(() => null);
     expect(auditSink.ofType('account_not_provisioned')).toHaveLength(1);
   });
 
-  it('still increments rate-limit counters on silent drop (prevents free probing)', async () => {
+  it('rejected lookups still burn rate-limit quota (prevents free probing)', async () => {
     const deps = buildAuthDeps({ store, repo, audit: auditSink });
-    await sendOtp(deps, makeParams({ role: 'vendor' }));
+    await sendOtp(deps, makeParams({ role: 'vendor' })).catch(() => null);
     expect(store.sendCounts10m.get('919812345678')).toBe(1);
+  });
+
+  it('a rate-limited prober is stopped BEFORE the account lookup', async () => {
+    store.sendCounts10m.set('919812345678', OTP_SEND_MAX_PER_10M);
+    const deps = buildAuthDeps({ store, repo, audit: auditSink });
+    await expect(sendOtp(deps, makeParams({ role: 'vendor' }))).rejects.toBeInstanceOf(
+      RateLimitError,
+    );
+  });
+
+  it('sends an OTP to a NEW customer too (customers are never pre-checked)', async () => {
+    const deps = buildAuthDeps({ store, repo, audit: auditSink });
+    const res = await sendOtp(deps, makeParams({ role: 'customer' }));
+    expect(res.requestId).toBeTypeOf('string');
+    expect(mockDispatch).toHaveBeenCalledOnce();
   });
 
   // ── Send rate limits ──────────────────────────────────────────────────────

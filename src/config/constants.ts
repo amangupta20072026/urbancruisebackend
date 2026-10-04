@@ -52,6 +52,40 @@ export const VERIFY_FAIL_LOCK_THRESHOLD = 5;
 export const VERIFY_LOCK_DURATION_SECONDS = 15 * 60; // 15 min
 
 /* ==============================================================================
+ * Customer onboarding (new customer after OTP verify)
+ * ============================================================================== */
+
+/** How long a new customer has to finish the onboarding form after verifying
+ *  their OTP. After this they must request a fresh OTP. */
+export const ONBOARDING_TICKET_TTL_SECONDS = 30 * 60; // 30 min
+
+/** Max time to wait for the per-mobile MySQL named lock that serialises
+ *  customer creation (prevents duplicate rows for the same number). */
+export const CUSTOMER_CREATE_LOCK_TIMEOUT_SECONDS = 5;
+
+/* ==============================================================================
+ * Account status — which values in the shared DB mean "may log in"
+ * ==============================================================================
+ * The web app owns these columns. Comparison is case-insensitive and trimmed.
+ * Anything NOT listed here is treated as inactive (allowlist, not denylist):
+ * a new status value added by the web team can never accidentally grant
+ * access.
+ *
+ *   uc_staff.status — enum('active','suspended','left')
+ *   vendors.status  — free varchar; NULL/'' on legacy rows
+ *   customers / drivers — no status column → always active
+ *
+ * Verify the vendor values in production with:
+ *   SELECT status, COUNT(*) FROM vendors GROUP BY status;
+ * ============================================================================== */
+export const ACTIVE_STATUS_VALUES: ReadonlySet<string> = new Set(['active']);
+
+/** Legacy vendor rows were created before the status column existed.
+ *  true  → NULL/'' vendor status is treated as active.
+ *  false → only rows explicitly marked active may log in. */
+export const VENDOR_NULL_STATUS_IS_ACTIVE = true;
+
+/* ==============================================================================
  * OTP send rate limits (per mobile). Enforced in Redis before hitting MSG91.
  * ============================================================================== */
 

@@ -6,7 +6,7 @@
  * `===` on secrets leaks by CPU-time side-channel; `timingSafeEqual` doesn't.
  * ==============================================================================
  */
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 /** Timing-safe string comparison — use for HMACs, tokens, OTPs. */
 export function safeEqual(a: string, b: string): boolean {
@@ -19,4 +19,10 @@ export function safeEqual(a: string, b: string): boolean {
 /** SHA-256 hex digest. */
 export function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
+}
+
+/** HMAC-SHA-256 hex digest. Use when the input space is small (e.g. a 6-digit
+ *  OTP) so a leaked hash cannot be reversed by brute force without the key. */
+export function hmacSha256(key: string, input: string): string {
+  return createHmac('sha256', key).update(input).digest('hex');
 }

@@ -12,7 +12,13 @@
 import type { RowDataPacket } from 'mysql2/promise';
 import { pool } from '../../../shared/db/pool.js';
 import type { ResolvedUser, UserProfileDto } from '../types.js';
-import { candidateFormats, normalisePhoneToE164, placeholder, normStatus } from './users-shared.js';
+import {
+  candidateFormats,
+  placeholders,
+  normalisePhoneToE164,
+  placeholder,
+  normStatus,
+} from './users-shared.js';
 
 /* --------------------------------------------------------------------------
  * DB row shape
@@ -33,7 +39,7 @@ type UcStaffRow = RowDataPacket & {
 export async function findUcStaffByPhone(mobile: string): Promise<ResolvedUser | null> {
   const fmts = candidateFormats(mobile);
   const [rows] = await pool.execute<UcStaffRow[]>(
-    `SELECT id, mobile, status FROM uc_staff WHERE mobile IN (?, ?, ?) LIMIT 1`,
+    `SELECT id, mobile, status FROM uc_staff WHERE mobile IN (${placeholders(fmts)}) LIMIT 1`,
     fmts,
   );
   if (!rows.length) return null;
@@ -43,9 +49,21 @@ export async function findUcStaffByPhone(mobile: string): Promise<ResolvedUser |
     entityId: String(r.id),
     userId: String(r.id),
     subRole: null,
-    status: normStatus(r.status),
+    status: normStatus(r.status, { nullIsActive: false }),
     requiresProfileSetup: false,
   };
+}
+
+/* --------------------------------------------------------------------------
+ * Status by id — 'active' only; 'suspended' and 'left' are inactive.
+ * -------------------------------------------------------------------------- */
+export async function getUcStaffStatusById(id: string): Promise<ResolvedUser['status'] | null> {
+  const [rows] = await pool.execute<UcStaffRow[]>(
+    'SELECT id, status FROM uc_staff WHERE id = ? LIMIT 1',
+    [id],
+  );
+  if (!rows.length) return null;
+  return normStatus(rows[0]!.status, { nullIsActive: false });
 }
 
 /* --------------------------------------------------------------------------

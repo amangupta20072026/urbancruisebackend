@@ -47,6 +47,12 @@ export const AUTH_ERROR = {
    */
   SESSION_ORPHANED: 'session_orphaned',
   REFRESH_INVALID: 'refresh_invalid',
+  /** New-customer onboarding ticket missing, expired or already used —
+   *  the client must restart from phone entry (request a new OTP). */
+  ONBOARDING_EXPIRED: 'onboarding_expired',
+  /** Onboarding ticket presented from a different device than the one
+   *  that verified the OTP. */
+  ONBOARDING_INVALID: 'onboarding_invalid',
 } as const;
 export type AuthErrorCode = (typeof AUTH_ERROR)[keyof typeof AUTH_ERROR];
 
@@ -80,7 +86,12 @@ export type ResolvedUser = {
   entityId: string;
   userId: string;
   subRole: SubRole;
-  status: 'active' | 'suspended' | 'deleted' | 'other';
+  /**
+   * 'active'   — may log in.
+   * 'inactive' — exists but must NOT log in (suspended, left, blocked, or any
+   *              status value not on the allowlist in config/constants.ts).
+   */
+  status: 'active' | 'inactive';
   requiresProfileSetup: boolean;
 };
 
@@ -122,7 +133,10 @@ export type UserProfileDto = {
   memberSince: string;
 };
 
-export type VerifyOtpResponseDto = {
+/** Session payload returned whenever a login completes (verify for an
+ *  existing user, or onboarding for a new customer). */
+export type AuthenticatedResponseDto = {
+  status: 'authenticated';
   accessToken: string;
   refreshToken: string;
   userId: string;
@@ -131,6 +145,33 @@ export type VerifyOtpResponseDto = {
   entityId: string;
   requiresProfileSetup: boolean;
   profile: UserProfileDto;
+};
+
+/** Returned by verify when the OTP is correct but the number is a NEW
+ *  customer. No session exists yet and no customer row has been created:
+ *  the client shows the onboarding form and calls
+ *  POST /auth/customer/onboard with this token. */
+export type OnboardingRequiredResponseDto = {
+  status: 'onboarding_required';
+  onboardingToken: string;
+  expiresInSeconds: number;
+  role: 'customer';
+};
+
+export type VerifyOtpResponseDto = AuthenticatedResponseDto | OnboardingRequiredResponseDto;
+
+/** Redis-stored onboarding ticket (value of `auth:onboard:{sha256(token)}`). */
+export type OnboardingTicket = {
+  mobile: string;
+  deviceId: string;
+  issuedAt: number;
+};
+
+/** Minimum customer details collected by the onboarding screen. */
+export type CustomerOnboardingDetails = {
+  firstName: string;
+  lastName: string | null;
+  email: string | null;
 };
 
 /**

@@ -20,14 +20,19 @@
  */
 
 import type { MobileFlags } from '../repository/mobile-registry.js';
-import type { ResolvedUser, UserProfileDto, AuthSessionRow } from '../types.js';
-import type { CreateSessionInput } from '../repository/sessions.js';
+import type {
+  ResolvedUser,
+  UserProfileDto,
+  AuthSessionRow,
+  CustomerOnboardingDetails,
+} from '../types.js';
+import type { CreateSessionInput, RevokeReason } from '../repository/sessions.js';
 import type { OtpEventInsert, LoginEventInsert, DlrUpdate } from '../repository/audit.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
 
 // Re-export the audit input types so callers can import from the port layer
 // instead of reaching into the repository implementation directory.
-export type { OtpEventInsert, LoginEventInsert, DlrUpdate };
+export type { OtpEventInsert, LoginEventInsert, DlrUpdate, RevokeReason };
 
 export interface IAuthRepository {
   // ── mobile_registry ───────────────────────────────────────────────────────
@@ -41,7 +46,19 @@ export interface IAuthRepository {
   // ── users — phone lookup + customer provisioning ──────────────────────────
 
   findUserByPhone(role: UserRole, mobile: string): Promise<ResolvedUser | null>;
-  createCustomerShell(mobile: string): Promise<ResolvedUser>;
+
+  /**
+   * Create the customer ONLY after onboarding details are submitted.
+   * Must be duplicate-safe: if a row for this mobile already exists (or
+   * appears concurrently), return it with created=false instead of inserting.
+   */
+  createCustomerIfAbsent(
+    mobile: string,
+    details: CustomerOnboardingDetails,
+  ): Promise<{ user: ResolvedUser; created: boolean }>;
+
+  /** Current status of a known account; null when the row no longer exists. */
+  getAccountStatus(role: UserRole, entityId: string): Promise<ResolvedUser['status'] | null>;
 
   // ── profiles ──────────────────────────────────────────────────────────────
 
@@ -55,9 +72,11 @@ export interface IAuthRepository {
 
   createSession(input: CreateSessionInput): Promise<void>;
   findSessionByJti(jti: string): Promise<AuthSessionRow | null>;
-  markSessionRevoked(jti: string, reason: string): Promise<void>;
-  revokeAllForEntity(role: UserRole, entityId: string, reason: string): Promise<string[]>;
-  rotateSession(oldJti: string, next: CreateSessionInput): Promise<void>;
+  markSessionRevoked(jti: string, reason: RevokeReason): Promise<void>;
+  revokeAllForEntity(role: UserRole, entityId: string, reason: RevokeReason): Promise<string[]>;
+  /** Atomically revoke oldJti and create next. Returns false (and creates
+   *  nothing) when oldJti was already revoked by a concurrent refresh. */
+  rotateSession(oldJti: string, next: CreateSessionInput): Promise<boolean>;
 
   // ── audit ─────────────────────────────────────────────────────────────────
 

@@ -117,6 +117,32 @@ if (parsed.data.JWT_ACCESS_SECRET === parsed.data.JWT_REFRESH_SECRET) {
   process.exit(1);
 }
 
+/**
+ * Test-mobile safety net. Numbers in MSG91_TEST_MOBILES skip SMS and accept
+ * MSG91_TEST_OTP, so anyone who knows that code can log in as those numbers.
+ * In production that is only acceptable for a dedicated store-review account
+ * with a non-guessable code — never with a trivial code like 123456.
+ */
+if (parsed.data.NODE_ENV === 'production' && parsed.data.MSG91_TEST_MOBILES.trim() !== '') {
+  const code = parsed.data.MSG91_TEST_OTP;
+  const weak =
+    /^(\d)\1{5}$/.test(code) || // 000000, 111111, ...
+    '0123456789'.includes(code) || // 123456, 234567, ...
+    '9876543210'.includes(code); // 654321, 987654, ...
+  if (weak) {
+    console.error(
+      '\n❌ MSG91_TEST_MOBILES is set in production with a guessable MSG91_TEST_OTP.\n' +
+        '   Anyone could log in as those numbers. Clear MSG91_TEST_MOBILES, or use a\n' +
+        '   random 6-digit MSG91_TEST_OTP for a dedicated store-review number only.\n',
+    );
+    process.exit(1);
+  }
+  console.warn(
+    `\n⚠️  ${parsed.data.MSG91_TEST_MOBILES.split(',').filter(Boolean).length} test mobile(s) ` +
+      'enabled in production (fixed OTP, no SMS). Use only for store-review accounts.\n',
+  );
+}
+
 export const ENV = Object.freeze({
   ...parsed.data,
   isProd: parsed.data.NODE_ENV === 'production',

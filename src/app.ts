@@ -10,6 +10,9 @@
  *   3. requestContext   — AsyncLocalStorage store (id + identity available anywhere)
  *   4. httpLogger       — 1 structured log line per request, includes req.id
  *   5. CORS             — before body parsers so preflight is fast
+ *   5b. Webhooks        — mounted before the global body parsers; the route
+ *                          verifies its URL token FIRST, then parses with its
+ *                          own 1 MB limit. Every other route keeps 100 KB.
  *   6. Body parsers     — express.json / express.urlencoded (v5 built-in)
  *   7. Rate limit       — after body parsers so we don't block valid low-cost 405s
  *                          but before route handlers so buckets are respected
@@ -56,17 +59,22 @@ export function buildApp(): Express {
 
   //  app.use(corsMiddleware);
 
-  // 6. Body parsers (Express 5 built-in)
-  app.use(express.json({ limit: JSON_BODY_LIMIT }));
-  app.use(express.urlencoded({ extended: true, limit: URLENCODED_BODY_LIMIT }));
-
-  // 7a. Provider webhooks — mounted BEFORE the global rate limit because
+  // 5b/7a. Provider webhooks — mounted BEFORE the global body parsers (they
+  //     bring their own, larger limit) and BEFORE the global rate limit because
   //     MSG91 delivery reports arrive in bursts (one per SMS the platform
   //     just handled) and getting throttled here means losing delivery
   //     visibility. Authentication for these routes is the URL-embedded
   //     shared secret checked inside each webhook handler; no session
   //     applies.
+  //     The webhook router parses its own body (WEBHOOK_BODY_LIMIT) only AFTER
+  //     the URL token is verified, so an unauthenticated caller never gets
+  //     the larger allowance. Unmatched /webhooks/* paths fall through to the
+  //     strict global parsers below.
   app.use('/webhooks', authWebhooks());
+
+  // 6. Body parsers (Express 5 built-in) — strict limit for every other route.
+  app.use(express.json({ limit: JSON_BODY_LIMIT }));
+  app.use(express.urlencoded({ extended: true, limit: URLENCODED_BODY_LIMIT }));
 
   // 7b. Global rate limit (per-route limiters can layer on top)
   app.use(globalRateLimit);

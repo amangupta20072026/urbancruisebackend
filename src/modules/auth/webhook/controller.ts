@@ -23,23 +23,36 @@
  *   injectable repository as the rest of the auth module.
  * ==============================================================================
  */
-import type { Request, Response } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import { logger } from '../../../shared/logger/index.js';
 import { verifyWebhookToken, parseDlrPayload } from '../../../shared/providers/msg91/webhook.js';
 import { authDeps } from '../infrastructure/AuthContainer.js';
 
 type TokenParams = { token: string };
 
-export async function postMsg91Dlr(req: Request<TokenParams>, res: Response): Promise<Response> {
-  // 1. Authenticate via URL-embedded shared secret (timing-safe compare).
+/**
+ * Step 1 — authenticate via the URL-embedded shared secret (timing-safe
+ * compare). A separate middleware so it runs BEFORE the body is parsed
+ * (see webhook/routes.ts): a bad token never costs us a body parse.
+ */
+export function requireMsg91Token(
+  req: Request<TokenParams>,
+  res: Response,
+  next: NextFunction,
+): void {
   if (!verifyWebhookToken(req.params.token)) {
     logger.warn(
       { ip: req.ip, ua: req.header('user-agent') },
       'msg91 DLR webhook: rejected — bad token',
     );
-    return res.status(401).json({ error: { code: 'BAD_TOKEN', message: 'invalid webhook token' } });
+    res.status(401).json({ error: { code: 'BAD_TOKEN', message: 'invalid webhook token' } });
+    return;
   }
+  next();
+}
 
+/** Step 2+ — runs only after requireMsg91Token and the body parsers. */
+export async function postMsg91Dlr(req: Request<TokenParams>, res: Response): Promise<Response> {
   // 2. Parse whatever shape MSG91 sent.
   const records = parseDlrPayload(req.body);
 

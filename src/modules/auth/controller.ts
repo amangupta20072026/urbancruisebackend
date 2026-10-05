@@ -35,6 +35,7 @@ export async function postRequestOtp(req: Request, res: Response): Promise<Respo
     role: body.role,
     idempotencyKey: idem,
     ip: clientIp(req),
+    ...(body.captchaToken ? { captchaToken: body.captchaToken } : {}),
   });
   return ok(res, out);
 }

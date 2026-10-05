@@ -15,7 +15,11 @@ import {
   InMemoryAuthRepository,
   NoopAuditSink,
 } from '../infrastructure/testing/index.js';
-import { signRefreshToken } from '../../../shared/auth/jwt.js';
+import {
+  signRefreshToken,
+  verifyRefreshToken,
+  verifyAccessToken,
+} from '../../../shared/auth/jwt.js';
 import { hashForStorage } from '../../../shared/auth/tokens.js';
 import { AuthError } from '../../../shared/errors/index.js';
 import type { AuthSessionRow } from '../types.js';
@@ -549,5 +553,92 @@ describe('push tokens are removed on sign-out (audit #7 regression)', () => {
       }),
     ).resolves.toBeUndefined();
     expect(store.isDenied('jti-current')).toBe(true);
+  });
+});
+
+/* ==============================================================================
+ * REGRESSION — audit item #11: refresh re-checks WHO the phone belongs to.
+ * Before the fix, a phone removed from (or reassigned away from) an account
+ * kept that account's access for the whole 30-day refresh TTL, and a changed
+ * vendor sub-role was ignored until the next login.
+ * ============================================================================== */
+describe('refresh re-binds the session to its phone (audit #11 regression)', () => {
+  const PHONE = '919812345678';
+  let store: InMemoryOtpSessionStore;
+  let repo: InMemoryAuthRepository;
+
+  beforeEach(() => {
+    store = new InMemoryOtpSessionStore();
+    repo = new InMemoryAuthRepository();
+  });
+
+  function seedSessionFor(jti: string, mob: string | null, extra: Partial<AuthSessionRow> = {}) {
+    const token = signRefreshToken({ sub: '42', jti, ...(mob ? { mob } : {}) });
+    repo.seedSession(baseSessionRow({ jti, refresh_token_hash: hashForStorage(token), ...extra }));
+    return token;
+  }
+  const deps = () => buildAuthDeps({ store, repo, audit: new NoopAuditSink() });
+
+  it('phone still linked → rotates, and the new refresh token keeps the binding', async () => {
+    repo.seedUser({ ...ACTIVE_CUSTOMER_42, mobile: PHONE });
+    const token = seedSessionFor('jti-old', PHONE);
+    const out = await refreshSession(deps(), token, DEVICE, null, null);
+    expect(verifyRefreshToken(out.refreshToken).mob).toBe(PHONE);
+  });
+
+  it('phone REMOVED from the account → SESSION_REVOKED, this session ends', async () => {
+    // Account 42 still exists and is active, but now under a different phone.
+    repo.seedUser({ ...ACTIVE_CUSTOMER_42, mobile: '919800000000' });
+    const token = seedSessionFor('jti-old', PHONE);
+    await expect(refreshSession(deps(), token, DEVICE, null, null)).rejects.toMatchObject({
+      code: 'session_revoked',
+    });
+    expect(repo.revokedSessions).toContainEqual({ jti: 'jti-old', reason: 'admin_force' });
+    expect(store.isDenied('jti-old')).toBe(true);
+    expect(repo.deletedPushTokens).toContainEqual({
+      role: 'customer',
+      entityId: '42',
+      deviceId: 'dev-1',
+    });
+  });
+
+  it('phone REASSIGNED to a different account → rejected', async () => {
+    repo.seedUser({ ...ACTIVE_CUSTOMER_42, mobile: '919800000000' });
+    repo.seedUser({ ...ACTIVE_CUSTOMER_42, mobile: PHONE, entityId: '77', userId: '77' });
+    const token = seedSessionFor('jti-old', PHONE);
+    await expect(refreshSession(deps(), token, DEVICE, null, null)).rejects.toMatchObject({
+      code: 'session_revoked',
+    });
+  });
+
+  it("only THIS session ends — the account's other sessions are untouched", async () => {
+    repo.seedUser({ ...ACTIVE_CUSTOMER_42, mobile: '919800000000' });
+    const token = seedSessionFor('jti-old', PHONE);
+    seedSessionFor('jti-other-phone', '919800000000', { id: 2 });
+    await store.addActiveSession('customer', '42', 'jti-other-phone');
+    await refreshSession(deps(), token, DEVICE, null, null).catch(() => null);
+    expect(repo.revokedSessions.some(r => r.jti === 'jti-other-phone')).toBe(false);
+    expect(store.isDenied('jti-other-phone')).toBe(false);
+    expect(store.getActiveSessions('customer', '42').has('jti-other-phone')).toBe(true);
+  });
+
+  it('vendor sub-role is re-derived on refresh (owner → opsManager)', async () => {
+    repo.seedUser({
+      ...ACTIVE_CUSTOMER_42,
+      mobile: PHONE,
+      role: 'vendor',
+      subRole: 'opsManager', // the web app changed this person's role
+    });
+    const token = seedSessionFor('jti-old', PHONE, { role: 'vendor', sub_role: 'owner' });
+    const out = await refreshSession(deps(), token, DEVICE, null, null);
+    expect(verifyAccessToken(out.accessToken).subRole).toBe('opsManager');
+    expect(repo.createdSessions.at(-1)?.subRole).toBe('opsManager');
+  });
+
+  it('legacy token without a phone binding still refreshes (backward compatible)', async () => {
+    repo.seedUser({ ...ACTIVE_CUSTOMER_42, mobile: '919800000000' });
+    const token = seedSessionFor('jti-old', null);
+    const out = await refreshSession(deps(), token, DEVICE, null, null);
+    expect(verifyRefreshToken(out.refreshToken).mob).toBeUndefined();
   });
 });

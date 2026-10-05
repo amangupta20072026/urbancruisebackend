@@ -29,31 +29,63 @@
 import React from 'react';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Document, Page, Text, View, Image, StyleSheet, Font } from '@react-pdf/renderer';
 import { formatRupees, rupeesToWords, fmtDateTime } from '../../../shared/utils/currency.js';
+import { logger } from '../../../shared/logger/index.js';
 
 /* ── Resolve assets directory ── */
-// process.cwd() = project root (where npm run dev is started).
-// Works in both dev (tsx) and prod (node dist/) because the server is always
-// started from the project root. The assets folder stays at src/assets.
-const ASSETS_DIR = path.join(process.cwd(), 'src', 'assets');
+// Searched in order (audit fix #13):
+//   1. Next to the compiled code — src/assets when running from source (tsx),
+//      dist/assets in production (`npm run build` copies src/assets there).
+//   2. <cwd>/src/assets — fallback for deployments that ship the source tree.
+// The old code ONLY used <cwd>/src/assets, so a deploy that ships just dist/
+// (or a PM2 config with a different cwd) silently lost the logo.
+const ASSET_DIRS = [
+  fileURLToPath(new URL('../../../assets/', import.meta.url)),
+  path.join(process.cwd(), 'src', 'assets'),
+];
+
+/** The logo file actually present in src/assets (the old name had a typo). */
+export const RECEIPT_LOGO_FILE = 'ucwithhinditext.png';
+
+let missingLogoWarned = false;
 
 /**
  * Load an asset image as a base64 data URI.
  * Called LAZILY inside renderReceipt() — not at module load time.
- * Returns '' when the file is missing so the Image component simply
- * doesn't render rather than crashing the process.
+ * Returns '' when the file is missing, so the receipt falls back to a text
+ * header instead of crashing — but now says so ONCE in the logs, rather
+ * than silently shipping logo-less receipts forever.
  */
 function loadImage(filename: string): string {
-  const p = path.join(ASSETS_DIR, filename);
-  try {
-    const buf = fs.readFileSync(p);
-    const ext = path.extname(filename).slice(1).toLowerCase();
-    const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
-    return `data:${mime};base64,${buf.toString('base64')}`;
-  } catch {
-    return '';
+  for (const dir of ASSET_DIRS) {
+    try {
+      const buf = fs.readFileSync(path.join(dir, filename));
+      const ext = path.extname(filename).slice(1).toLowerCase();
+      const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
+      return `data:${mime};base64,${buf.toString('base64')}`;
+    } catch {
+      // try the next directory
+    }
   }
+  if (!missingLogoWarned) {
+    missingLogoWarned = true;
+    logger.warn(
+      { filename, searched: ASSET_DIRS },
+      'receipt logo not found — receipts will use the text header. Did the build copy src/assets?',
+    );
+  }
+  return '';
+}
+
+/** Shown wherever the payment record has no value — never an invented one. */
+export const NOT_RECORDED = 'Not recorded';
+
+/** Format an ISO timestamp, or NOT_RECORDED when absent / unparseable. */
+function fmtMaybeDateTime(iso: string | null): string {
+  if (!iso || Number.isNaN(Date.parse(iso))) return NOT_RECORDED;
+  return fmtDateTime(iso);
 }
 
 /* ── Colours ── */
@@ -239,9 +271,12 @@ const s = StyleSheet.create({
 export type ReceiptData = {
   receiptNumber: string;
   paymentId: string;
-  transactionId: string;
-  paymentMethod: string;
-  paymentEventAt: string;
+  /** null → printed as "Not recorded" (never invented). */
+  transactionId: string | null;
+  /** null → printed as "Not recorded" (never invented). */
+  paymentMethod: string | null;
+  /** ISO timestamp of the payment; null → "Not recorded" (never "now"). */
+  paymentEventAt: string | null;
   amount: number;
   travelDate: string;
   vehicleType: string;
@@ -317,7 +352,7 @@ export const ReceiptDocument: React.FC<{ data: ReceiptData; logoUri: string }> =
         <Text style={s.sectionTitle}>Payment Details</Text>
         <View style={s.tableRow}>
           <Text style={s.tableLabel}>Payment Method</Text>
-          <Text style={s.tableValue}>{data.paymentMethod}</Text>
+          <Text style={s.tableValue}>{data.paymentMethod ?? NOT_RECORDED}</Text>
         </View>
         <View style={s.tableRow}>
           <Text style={s.tableLabel}>Payment ID</Text>
@@ -325,11 +360,11 @@ export const ReceiptDocument: React.FC<{ data: ReceiptData; logoUri: string }> =
         </View>
         <View style={s.tableRow}>
           <Text style={s.tableLabel}>Transaction ID</Text>
-          <Text style={s.tableValueGreen}>{data.transactionId}</Text>
+          <Text style={s.tableValueGreen}>{data.transactionId ?? NOT_RECORDED}</Text>
         </View>
         <View style={s.tableRow}>
           <Text style={s.tableLabel}>Paid On</Text>
-          <Text style={s.tableValue}>{fmtDateTime(data.paymentEventAt)}</Text>
+          <Text style={s.tableValue}>{fmtMaybeDateTime(data.paymentEventAt)}</Text>
         </View>
         <View style={s.tableRow}>
           <Text style={s.tableLabel}>Vehicle</Text>
@@ -390,7 +425,7 @@ export const ReceiptDocument: React.FC<{ data: ReceiptData; logoUri: string }> =
 export async function renderReceipt(data: ReceiptData): Promise<Buffer> {
   const { renderToBuffer } = await import('@react-pdf/renderer');
   // Lazy: load image only when an actual render is requested.
-  const logoUri = loadImage('ucwithtexthindi.png');
+  const logoUri = loadImage(RECEIPT_LOGO_FILE);
   const element = <ReceiptDocument data={data} logoUri={logoUri} />;
   return renderToBuffer(element);
 }

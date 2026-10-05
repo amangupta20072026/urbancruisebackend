@@ -9,22 +9,23 @@
  * - Slow requests (>1s) get promoted to warn so they surface in dashboards.
  * ==============================================================================
  */
-import { randomUUID } from 'node:crypto';
 import { pinoHttp } from 'pino-http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { HEADER_REQUEST_ID } from '../../config/constants.js';
 import { logger } from './index.js';
 import { redactUrl } from './redactUrl.js';
+import { resolveRequestId } from '../utils/request-id.js';
 
 const SLOW_MS = 1000;
 
 export const httpLogger = pinoHttp({
   logger,
   genReqId(req: IncomingMessage, res: ServerResponse) {
-    // Nginx forwards X-Request-Id (see deploy/nginx/*). Trust it — Nginx sets a
-    // fresh value if the client didn't send one, so we never leak inbound IDs.
-    const inbound = req.headers[HEADER_REQUEST_ID];
-    const id = typeof inbound === 'string' && inbound.length > 0 ? inbound : randomUUID();
+    // Fallback only: the requestId middleware runs first and pino-http reuses
+    // its req.id. Same validation either way (audit fix #16) — an inbound id
+    // is never trusted verbatim, even when it "came from" Nginx, because a
+    // client can send the header straight through a proxy that forwards it.
+    const id = resolveRequestId(req.headers[HEADER_REQUEST_ID]);
     if (!res.getHeader('X-Request-Id')) res.setHeader('X-Request-Id', id);
     return id;
   },

@@ -7,6 +7,8 @@
  *   IAuthRepository   →  MysqlAuthRepository
  *   IOtpSessionStore  →  RedisOtpSessionStore
  *   IAuditSink        →  SqlAuditSink (wraps MysqlAuthRepository)
+ *   ICaptchaVerifier  →  HCaptchaVerifier when HCAPTCHA_SECRET is set,
+ *                        otherwise DisabledCaptchaVerifier (gate off)
  *
  * Then assembles the AuthServiceDeps bundle that every service function
  * receives instead of importing concrete singletons directly.
@@ -25,9 +27,12 @@
 import { MysqlAuthRepository } from './MysqlAuthRepository.js';
 import { RedisOtpSessionStore } from './RedisOtpSessionStore.js';
 import { SqlAuditSink } from './SqlAuditSink.js';
+import { HCaptchaVerifier, DisabledCaptchaVerifier } from './HCaptchaVerifier.js';
+import { ENV } from '../../../config/env.js';
 import type { IAuthRepository } from '../ports/IAuthRepository.js';
 import type { IOtpSessionStore } from '../ports/IOtpSessionStore.js';
 import type { IAuditSink } from '../ports/IAuditSink.js';
+import type { ICaptchaVerifier } from '../ports/ICaptchaVerifier.js';
 
 /**
  * The complete set of dependencies injected into every auth service function.
@@ -37,6 +42,7 @@ export type AuthServiceDeps = {
   readonly repo: IAuthRepository;
   readonly store: IOtpSessionStore;
   readonly audit: IAuditSink;
+  readonly captcha: ICaptchaVerifier;
 };
 
 /**
@@ -47,11 +53,17 @@ export function buildAuthDeps(overrides: {
   repo?: IAuthRepository;
   store?: IOtpSessionStore;
   audit?: IAuditSink;
+  captcha?: ICaptchaVerifier;
 }): AuthServiceDeps {
   const repo = overrides.repo ?? new MysqlAuthRepository();
   const store = overrides.store ?? new RedisOtpSessionStore();
   const audit = overrides.audit ?? new SqlAuditSink(repo);
-  return Object.freeze({ repo, store, audit });
+  const captcha =
+    overrides.captcha ??
+    (ENV.HCAPTCHA_SECRET
+      ? new HCaptchaVerifier(ENV.HCAPTCHA_SECRET, ENV.HCAPTCHA_SITEKEY ?? null)
+      : new DisabledCaptchaVerifier());
+  return Object.freeze({ repo, store, audit, captcha });
 }
 
 /**

@@ -27,7 +27,7 @@ import { hashForStorage } from '../../../shared/auth/tokens.js';
 import { AuthError, ForbiddenError } from '../../../shared/errors/index.js';
 import { ttlToSeconds, expiryFromTtl } from '../../../shared/utils/duration.js';
 import { AUTH_ERROR } from '../types.js';
-import type { ResolvedUser, RefreshResponseDto, MeResponseDto, DeviceMeta } from '../types.js';
+import type { AuthSessionRow, RefreshResponseDto, MeResponseDto, DeviceMeta } from '../types.js';
 import type { UserRole, SubRole } from '../../../shared/rbac/roles.js';
 import type { AuthServiceDeps } from '../infrastructure/AuthContainer.js';
 import type { RevokeReason } from '../ports/IAuthRepository.js';
@@ -92,13 +92,41 @@ export async function refreshSession(
     );
   }
 
-  // Rotate: new jti + tokens
+  // Re-bind to the phone that started this session (audit fix #11).
+  // Before this, refresh never re-checked WHO the phone belongs to: a vendor
+  // manager whose number was removed from the vendor row, or a staff member
+  // whose number was reassigned, kept access for the full 30-day refresh TTL,
+  // and a changed vendor sub-role was ignored until the next login.
+  // Re-running the login lookup on every refresh fixes both. Tokens issued
+  // before `mob` existed skip this and age out within JWT_REFRESH_TTL.
+  let subRole = (row.sub_role ?? null) as SubRole;
+  if (claims.mob) {
+    const current = await repo.findUserByPhone(row.role, claims.mob);
+    if (!current || current.entityId !== row.entity_id) {
+      await endSingleSession(deps, row, claims.jti);
+      logger.warn(
+        { role: row.role, entityId: row.entity_id, jti: claims.jti },
+        'refresh rejected — the phone that started this session is no longer linked to the account',
+      );
+      throw new AuthError(
+        'This number is no longer linked to your account. Please sign in again.',
+        AUTH_ERROR.SESSION_REVOKED,
+      );
+    }
+    subRole = current.subRole;
+  }
+
+  // Rotate: new jti + tokens (carrying the phone binding forward)
   const newJti = newId();
-  const newRefresh = signRefreshToken({ sub: claims.sub as string, jti: newJti });
+  const newRefresh = signRefreshToken({
+    sub: claims.sub as string,
+    jti: newJti,
+    ...(claims.mob ? { mob: claims.mob } : {}),
+  });
   const newAccess = signAccessToken({
     sub: claims.sub as string,
     role: row.role,
-    subRole: (row.sub_role ?? null) as ResolvedUser['subRole'],
+    subRole,
     entityId: row.entity_id,
     sid: newJti,
   });
@@ -109,7 +137,7 @@ export async function refreshSession(
     jti: newJti,
     role: row.role,
     entityId: row.entity_id,
-    subRole: (row.sub_role ?? null) as ResolvedUser['subRole'],
+    subRole,
     refreshTokenHash: newHash,
     previousJti: claims.jti,
     device,
@@ -246,6 +274,29 @@ async function revokeEverything(
     store.denyManySessions(revoked, ttlToSeconds(ENV.JWT_ACCESS_TTL)),
     store.clearActiveSessions(role, entityId),
     clearPushTokens(deps, role, entityId, null),
+  ]);
+}
+
+/* ==============================================================================
+ * endSingleSession — revoke ONE session chain (not the whole account).
+ * ==============================================================================
+ * Used when the phone that started a session no longer belongs to the
+ * account. The account itself is fine — e.g. a vendor's owner and other
+ * managers log in with their own phones — so only this chain ends.
+ * ============================================================================== */
+async function endSingleSession(
+  deps: AuthServiceDeps,
+  row: AuthSessionRow,
+  jti: string,
+): Promise<void> {
+  const { store, repo } = deps;
+  await repo.markSessionRevoked(jti, 'admin_force');
+  await Promise.all([
+    store.removeActiveSession(row.role, row.entity_id, jti),
+    store.denySession(jti, ttlToSeconds(ENV.JWT_ACCESS_TTL)),
+    row.device_id
+      ? clearPushTokens(deps, row.role, row.entity_id, row.device_id)
+      : Promise.resolve(),
   ]);
 }
 

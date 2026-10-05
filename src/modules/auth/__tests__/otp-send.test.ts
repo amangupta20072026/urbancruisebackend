@@ -380,3 +380,65 @@ describe('sendOtp', () => {
     expect(mockDispatch).toHaveBeenCalledTimes(OTP_SEND_MAX_PER_DAY);
   });
 });
+
+/* ==============================================================================
+ * REGRESSION — audit item #9: provider error text must never reach the client.
+ * ============================================================================== */
+describe('sendOtp — provider errors are not leaked (audit #9 regression)', () => {
+  const SECRET_PROVIDER_TEXT = 'Invalid authkey a1b2c3 for template 66f0e1 (account UC-PROD)';
+
+  async function failWith(failure: NonNullable<OtpDispatchResult['failure']>) {
+    mockDispatch.mockResolvedValue({
+      ok: false,
+      failure,
+      attempts: 1,
+      errorCode: '418',
+      errorMessage: SECRET_PROVIDER_TEXT,
+    });
+    const deps = buildAuthDeps({
+      store: new InMemoryOtpSessionStore(),
+      repo: new InMemoryAuthRepository(),
+      audit: new SpyAuditSink(),
+    });
+    return (await sendOtp(deps, makeParams()).catch((e: unknown) => e)) as {
+      message: string;
+      code: string;
+      statusCode: number;
+      details?: unknown;
+    };
+  }
+
+  it.each([
+    ['provider_forbidden', 409, 'otp_send_failed'],
+    ['template_bad', 409, 'otp_send_failed'],
+    ['unknown', 409, 'otp_send_failed'],
+    ['timeout', 409, 'otp_send_failed'],
+    ['rate_limited', 409, 'provider_rate_limited'],
+    ['wallet_low', 503, 'service_unavailable'],
+    ['circuit_open', 503, 'service_unavailable'],
+  ] as const)('%s → %i %s with a generic message', async (failure, status, code) => {
+    const err = await failWith(failure);
+    expect(err.statusCode).toBe(status); // contract unchanged
+    expect(err.code).toBe(code); // contract unchanged
+    expect(err.message).not.toContain('authkey');
+    expect(JSON.stringify(err.details ?? null)).not.toContain('wallet');
+    expect(err.message + JSON.stringify(err.details ?? null)).not.toContain(SECRET_PROVIDER_TEXT);
+  });
+
+  it('the raw provider text is still recorded in the audit trail for operators', async () => {
+    mockDispatch.mockResolvedValue({
+      ok: false,
+      failure: 'provider_forbidden',
+      attempts: 1,
+      errorMessage: SECRET_PROVIDER_TEXT,
+    });
+    const auditSink = new SpyAuditSink();
+    const deps = buildAuthDeps({
+      store: new InMemoryOtpSessionStore(),
+      repo: new InMemoryAuthRepository(),
+      audit: auditSink,
+    });
+    await sendOtp(deps, makeParams()).catch(() => null);
+    expect(auditSink.ofType('send_failed')[0]?.msg).toBe(SECRET_PROVIDER_TEXT);
+  });
+});

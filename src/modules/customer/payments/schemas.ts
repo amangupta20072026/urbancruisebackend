@@ -4,5 +4,5 @@
 import { z } from 'zod';
 
 export const paymentIdParamSchema = z.object({
-  id: z.string().min(1, 'Payment ID is required'),
+  id: z.string().min(1, 'Payment ID is required').max(64, 'Payment ID is too long'),
 });

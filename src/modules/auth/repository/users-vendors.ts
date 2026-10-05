@@ -17,7 +17,7 @@
 import type { RowDataPacket } from 'mysql2/promise';
 import { pool } from '../../../shared/db/pool.js';
 import type { ResolvedUser, UserProfileDto } from '../types.js';
-import type { SubRole } from '../../../shared/rbac/roles.js';
+import type { VendorSubRole } from '../../../shared/rbac/roles.js';
 import {
   candidateFormats,
   placeholders,
@@ -26,6 +26,8 @@ import {
   normStatus,
 } from './users-shared.js';
 import { VENDOR_NULL_STATUS_IS_ACTIVE } from '../../../config/constants.js';
+import { logger } from '../../../shared/logger/index.js';
+import { maskMobile } from '../../../shared/utils/phone.js';
 
 /* --------------------------------------------------------------------------
  * DB row shapes
@@ -67,22 +69,57 @@ export async function findVendorByPhone(mobile: string): Promise<ResolvedUser | 
   );
   if (!rows.length) return null;
   const v = rows[0]!;
+  const subRole = deriveVendorSubRole(v, mobile);
+  if (subRole === null) {
+    // SQL matched the row but no column clearly identifies this phone's
+    // role. Refuse rather than guess — see deriveVendorSubRole.
+    logger.error(
+      { alarm: 'vendor_subrole_unresolved', vendorId: v.id, mobile: maskMobile(mobile) },
+      'vendor login refused — phone matched in SQL but no role column matched; check the stored phone values',
+    );
+    return null;
+  }
   return {
     role: 'vendor',
     entityId: String(v.id),
     userId: String(v.id),
-    subRole: deriveVendorSubRole(v, fmts),
+    subRole,
     status: normStatus(v.status, { nullIsActive: VENDOR_NULL_STATUS_IS_ACTIVE }),
     requiresProfileSetup: false,
   };
 }
 
-function deriveVendorSubRole(v: VendorRow, fmts: string[]): SubRole {
-  const match = (col: string | null) => col !== null && fmts.includes(col);
+/**
+ * Which vendor role does `mobile` hold on this row? (audit fix #12)
+ *
+ * Compares DIGITS (last 10), not raw strings. MySQL matched the row with its
+ * own collation rules — trailing spaces and case are ignored — so a stored
+ * value like '9812345678 ' passes the SQL lookup but fails an exact
+ * JavaScript comparison. The old code then fell through to a "safe default"
+ * of 'owner', the MOST privileged vendor role: a manager with a stray space
+ * in their stored number became an owner.
+ *
+ * Now: precedence owner > bookingManager > opsManager (unchanged), and when
+ * nothing matches the result is null, which the caller turns into a refused
+ * login. Least privilege: never grant a role we cannot positively identify.
+ */
+export function deriveVendorSubRole(
+  v: Pick<VendorRow, 'phone' | 'owner_phone' | 'manager_phone1' | 'manager_phone2'>,
+  mobile: string,
+): VendorSubRole | null {
+  const target = last10(mobile);
+  if (target === null) return null;
+  const match = (col: string | null) => col !== null && last10(col) === target;
   if (match(v.owner_phone) || match(v.phone)) return 'owner';
   if (match(v.manager_phone1)) return 'bookingManager';
   if (match(v.manager_phone2)) return 'opsManager';
-  return 'owner'; // safe default
+  return null;
+}
+
+/** Last 10 digits of a phone value, or null when it is not a phone. */
+function last10(raw: string): string | null {
+  const d = raw.replace(/\D/g, '');
+  return d.length >= 10 ? d.slice(-10) : null;
 }
 
 /* --------------------------------------------------------------------------

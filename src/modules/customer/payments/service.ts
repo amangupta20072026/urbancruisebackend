@@ -18,7 +18,7 @@
  */
 import { NotFoundError, AppError } from '../../../shared/errors/index.js';
 import type { Identity } from '../../../shared/types/identity.js';
-import { newId } from '../../../shared/utils/id.js';
+import { sha256 } from '../../../shared/utils/crypto.js';
 import * as repo from './repository.js';
 import { renderReceipt, type ReceiptData } from './receipt-template.js';
 
@@ -43,26 +43,44 @@ function isPaidStatus(status: string | null): boolean {
  *
  * The customer_amount column is a JSON blob. Your team may store fields
  * like { paymentMethod, transactionId, paidAt } in it once the gateway
- * integration is live. Until then this returns sensible fallbacks.
+ * integration is live.
+ *
+ * NEVER INVENT VALUES (audit fix #13). A missing field is returned as null
+ * and printed as "Not recorded". The old code filled the gaps with
+ * 'UPI', '—' and the CURRENT time as the payment date — so a receipt
+ * downloaded today claimed the customer paid today, by UPI. A receipt is a
+ * financial record; a wrong value is worse than an honest blank.
  */
 function extractPaymentMeta(customerAmount: unknown): {
-  paymentMethod: string;
-  transactionId: string;
-  paidAt: string;
+  paymentMethod: string | null;
+  transactionId: string | null;
+  paidAt: string | null;
 } {
-  if (customerAmount && typeof customerAmount === 'object') {
-    const a = customerAmount as Record<string, unknown>;
-    return {
-      paymentMethod: typeof a['paymentMethod'] === 'string' ? a['paymentMethod'] : 'UPI',
-      transactionId: typeof a['transactionId'] === 'string' ? a['transactionId'] : '—',
-      paidAt: typeof a['paidAt'] === 'string' ? a['paidAt'] : new Date().toISOString(),
-    };
-  }
+  const a =
+    customerAmount && typeof customerAmount === 'object'
+      ? (customerAmount as Record<string, unknown>)
+      : {};
+  const str = (v: unknown): string | null =>
+    typeof v === 'string' && v.trim() !== '' ? v.trim() : null;
+  const paidAt = str(a['paidAt']);
   return {
-    paymentMethod: 'UPI',
-    transactionId: '—',
-    paidAt: new Date().toISOString(),
+    paymentMethod: str(a['paymentMethod']),
+    transactionId: str(a['transactionId']),
+    paidAt: paidAt !== null && !Number.isNaN(Date.parse(paidAt)) ? paidAt : null,
   };
+}
+
+/**
+ * Stable receipt number for a payment (audit fix #13).
+ *
+ * The old number was random on every download, so one payment produced a
+ * different "receipt #" each time — impossible to reconcile or quote to
+ * support. Derived from the booking id it is the same on every download,
+ * and hashing keeps it non-sequential (no dsrs volume leak, not guessable
+ * as "the next receipt").
+ */
+export function receiptNumberFor(paymentKey: string): string {
+  return `UC-RCP-${sha256(`receipt:v1:${paymentKey}`).slice(0, 10).toUpperCase()}`;
 }
 
 export async function generateReceipt(
@@ -87,7 +105,7 @@ export async function generateReceipt(
 
   // 3. Build receipt data
   const { paymentMethod, transactionId, paidAt } = extractPaymentMeta(payment.customerAmount);
-  const receiptNumber = `UC-RCP-${newId().slice(0, 8).toUpperCase()}`;
+  const receiptNumber = receiptNumberFor(payment.bookingId ?? payment.id);
 
   // Parse total amount — strip currency symbols, commas, spaces
   const amountNum = parseFloat((payment.totalAmount ?? '0').replace(/[^0-9.]/g, '')) || 0;

@@ -33,7 +33,9 @@ export async function mintAuthenticatedSession(
   const { store, repo } = deps;
 
   const jti = newId();
-  const refresh = signRefreshToken({ sub: user.userId, jti });
+  // `mob` binds the session chain to the phone that logged in — refresh
+  // re-checks it (see session.ts → refreshSession, audit fix #11).
+  const refresh = signRefreshToken({ sub: user.userId, jti, mob: ctx.mobile });
   const access = signAccessToken({
     sub: user.userId,
     role: user.role,

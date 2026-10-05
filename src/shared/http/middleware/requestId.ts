@@ -7,13 +7,14 @@
  * downstream code can rely on `req.id` even if logging is disabled.
  * ==============================================================================
  */
-import { randomUUID } from 'node:crypto';
 import type { RequestHandler } from 'express';
 import { HEADER_REQUEST_ID } from '../../../config/constants.js';
+import { resolveRequestId } from '../../utils/request-id.js';
 
 export const requestId: RequestHandler = (req, res, next) => {
-  const inbound = req.header(HEADER_REQUEST_ID);
-  const id = inbound && inbound.length > 0 ? inbound : randomUUID();
+  // Caller-supplied ids are kept only if they are safe (audit fix #16) —
+  // see shared/utils/request-id.ts.
+  const id = resolveRequestId(req.header(HEADER_REQUEST_ID));
   // pino-http types req.id as string | number | object. We always use string.
   (req as unknown as { id: string }).id = id;
   res.setHeader('X-Request-Id', id);

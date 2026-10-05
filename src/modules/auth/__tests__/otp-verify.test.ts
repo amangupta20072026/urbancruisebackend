@@ -455,3 +455,24 @@ describe('verifyOtp', () => {
     });
   });
 });
+
+describe('login binds the refresh token to the phone (audit #11)', () => {
+  it('the refresh token minted at login carries the logged-in mobile', async () => {
+    const { verifyRefreshToken } = await import('../../../shared/auth/jwt.js');
+    const store = new InMemoryOtpSessionStore();
+    const repo = new InMemoryAuthRepository();
+    store.seedOtpSession(makeSession());
+    repo.seedUser({
+      mobile: MOBILE_E164,
+      role: 'customer',
+      entityId: '42',
+      userId: '42',
+      subRole: null,
+      status: 'active',
+      requiresProfileSetup: false,
+    });
+    const deps = buildAuthDeps({ store, repo, audit: new SpyAuditSink() });
+    const r = asAuthenticated(await verifyOtp(deps, makeParams()));
+    expect(verifyRefreshToken(r.refreshToken).mob).toBe(MOBILE_E164);
+  });
+});

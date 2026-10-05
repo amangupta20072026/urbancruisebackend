@@ -74,6 +74,18 @@ const schema = z.object({
   // ── Bcrypt ──────────────────────────────────────────────────────────────
   BCRYPT_COST: z.coerce.number().int().min(10).max(15).default(10),
 
+  // ── CAPTCHA (hCaptcha) ──────────────────────────────────────────────────
+  // After a number trips the OTP brute-force lock, mobile_registry marks it
+  // captcha_required_until (+1h). When HCAPTCHA_SECRET is set, /otp/request
+  // for such a number must carry a valid hCaptcha token (body.captchaToken).
+  //
+  // Leave UNSET until the mobile app renders the hCaptcha widget — enforcing
+  // before the app can send tokens would lock real users out for that hour.
+  // While unset the gate is OFF (a production boot prints a warning).
+  HCAPTCHA_SECRET: z.string().min(1).optional(),
+  /** Optional: when set, tokens issued for any other site key are rejected. */
+  HCAPTCHA_SITEKEY: z.string().min(1).optional(),
+
   // ── Role gate ──────────────────────────────────────────────────────────────────────────
   // Comma-separated list of UserRole values allowed through the authenticate
   // middleware. Any valid JWT whose role is NOT in this list is rejected with
@@ -140,6 +152,18 @@ if (parsed.data.NODE_ENV === 'production' && parsed.data.MSG91_TEST_MOBILES.trim
   console.warn(
     `\n⚠️  ${parsed.data.MSG91_TEST_MOBILES.split(',').filter(Boolean).length} test mobile(s) ` +
       'enabled in production (fixed OTP, no SMS). Use only for store-review accounts.\n',
+  );
+}
+
+/**
+ * CAPTCHA gate visibility. The gate is a real control only when configured;
+ * say so loudly in production so nobody assumes it is protecting them.
+ */
+if (parsed.data.NODE_ENV === 'production' && !parsed.data.HCAPTCHA_SECRET) {
+  console.warn(
+    '\n⚠️  HCAPTCHA_SECRET is not set — the post-lockout CAPTCHA gate is DISABLED.\n' +
+      '   Numbers that trip the OTP brute-force lock are only protected by the\n' +
+      '   lock itself. Set HCAPTCHA_SECRET once the mobile app renders hCaptcha.\n',
   );
 }
 

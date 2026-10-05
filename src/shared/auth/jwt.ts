@@ -28,6 +28,18 @@ export type AccessTokenClaims = JwtPayload & {
 export type RefreshTokenClaims = JwtPayload & {
   sub: string; // userId
   jti: string; // token id — the DB row that tracks this refresh
+  /**
+   * The mobile number (E.164 without '+', e.g. '919812345678') that logged
+   * in to start this session chain. Carried forward on every rotation so
+   * refresh can re-check that the phone still belongs to this account and
+   * re-derive its sub-role (audit fix #11). auth_sessions has no column for
+   * it, so it lives in the token — which only the server can sign.
+   *
+   * Optional: tokens issued before this field existed omit it; refresh
+   * falls back to the previous behaviour for them (they expire within
+   * JWT_REFRESH_TTL). The holder can read it — it is their own number.
+   */
+  mob?: string;
 };
 
 export function signAccessToken(

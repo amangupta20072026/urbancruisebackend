@@ -8,8 +8,18 @@
  * ==============================================================================
  */
 
-export const JSON_BODY_LIMIT = '10mb';
-export const URLENCODED_BODY_LIMIT = '10mb';
+/**
+ * Request body limits (audit fix #15). Were 10mb: every unauthenticated
+ * endpoint would read and JSON-parse up to 10 MB per request — a cheap
+ * CPU/memory amplifier for anyone. The largest legitimate body in this API
+ * (an FCM token registration, ~4 KB) is far below 100 KB. There are no file
+ * uploads; if one is added it must use its own route-level parser/limit.
+ */
+export const JSON_BODY_LIMIT = '100kb';
+export const URLENCODED_BODY_LIMIT = '100kb';
+
+/** Provider webhooks only (MSG91 DLR batches can carry hundreds of records). */
+export const WEBHOOK_BODY_LIMIT = '1mb';
 
 /** Default pagination page size when the caller doesn't specify one. */
 export const DEFAULT_PAGE_SIZE = 20;

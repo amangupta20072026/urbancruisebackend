@@ -10,7 +10,13 @@
  *                                       with a different payload returns 409
  *                                       rather than replaying someone else's
  *                                       response.
- *   2. Mobile registry hard blocks    — admin block, lock, captcha.
+ *   2. Mobile registry hard blocks    — admin block, lock.
+ *   2b. Post-lockout CAPTCHA gate     — while captcha_required_until is in
+ *                                       the future, a valid CAPTCHA token is
+ *                                       required (audit fix #10). Only when
+ *                                       HCAPTCHA_SECRET is configured; test
+ *                                       mobiles are exempt. Fails CLOSED if
+ *                                       the CAPTCHA provider is unreachable.
  *   3. Reserve rate-limit quota        — ATOMIC: cooldown via SET NX, then
  *                                       INCR every bucket and compare the
  *                                       post-increment value. Done BEFORE
@@ -57,7 +63,13 @@ import { ENV } from '../../../config/env.js';
 import { sha256 } from '../../../shared/utils/crypto.js';
 import { newId } from '../../../shared/utils/id.js';
 import { logger } from '../../../shared/logger/index.js';
-import { ForbiddenError, RateLimitError, ConflictError } from '../../../shared/errors/index.js';
+import {
+  AppError,
+  ForbiddenError,
+  RateLimitError,
+  ConflictError,
+  ServiceUnavailableError,
+} from '../../../shared/errors/index.js';
 import { dispatchOtp } from '../../../shared/providers/msg91/otp.js';
 import { normalizeMobile, maskMobile } from '../../../shared/utils/phone.js';
 import { AUTH_ERROR } from '../types.js';
@@ -79,6 +91,8 @@ export type SendOtpParams = {
   role: UserRole;
   idempotencyKey: string | null;
   ip: string | null;
+  /** hCaptcha token — required only inside a post-lockout CAPTCHA window. */
+  captchaToken?: string;
 };
 
 /** Numbers that bypass MSG91 entirely and receive `MSG91_TEST_OTP`. */
@@ -141,6 +155,16 @@ export async function sendOtp(
       AUTH_ERROR.ACCOUNT_LOCKED,
       { retryAfter },
     );
+  }
+
+  // 2b. Post-lockout CAPTCHA gate (only when configured; test mobiles exempt).
+  if (
+    !isTest &&
+    deps.captcha.enabled &&
+    flags?.captcha_required_until &&
+    flags.captcha_required_until > new Date()
+  ) {
+    await enforceCaptcha(deps, p, mobile);
   }
 
   // 3. Reserve quota atomically (before the account lookup, so probing is
@@ -287,6 +311,61 @@ const ROLE_LABEL: Record<Exclude<UserRole, 'customer'>, string> = {
   driver: 'a driver',
   uc: 'Urban Cruise staff',
 };
+
+/**
+ * Throws unless the request carries a CAPTCHA token the provider accepts.
+ * Runs BEFORE quota is reserved, so a bot without a solved CAPTCHA can
+ * neither send an SMS nor burn the real owner's quota.
+ */
+async function enforceCaptcha(
+  deps: AuthServiceDeps,
+  p: SendOtpParams,
+  mobile: string,
+): Promise<void> {
+  if (!p.captchaToken) {
+    await audit(deps.audit, {
+      mobile,
+      role: p.role,
+      event: 'send_failed',
+      ip: p.ip,
+      msg: 'captcha_missing',
+    });
+    throw new AppError({
+      statusCode: 400,
+      code: AUTH_ERROR.CAPTCHA_REQUIRED,
+      message: 'Please complete the verification challenge to continue.',
+    });
+  }
+
+  const verdict = await deps.captcha.verify(p.captchaToken, p.ip);
+  if (verdict.ok) return;
+
+  if (verdict.reason === 'unavailable') {
+    // Fail CLOSED: this gate is only demanded from numbers that just tripped
+    // the brute-force lock, so refusing for a few minutes is the safe side.
+    logger.error(
+      { alarm: 'captcha_provider_unavailable', mobile: maskMobile(mobile) },
+      'otp send: CAPTCHA provider unreachable — refusing send for a captcha-gated number',
+    );
+    throw new ServiceUnavailableError(
+      'Verification is temporarily unavailable. Please try again shortly.',
+      AUTH_ERROR.SERVICE_UNAVAILABLE,
+    );
+  }
+
+  await audit(deps.audit, {
+    mobile,
+    role: p.role,
+    event: 'send_failed',
+    ip: p.ip,
+    msg: `captcha_invalid:${verdict.providerCodes.join(',')}`.slice(0, 255),
+  });
+  throw new AppError({
+    statusCode: 400,
+    code: AUTH_ERROR.CAPTCHA_REQUIRED,
+    message: 'Verification failed. Please complete the challenge again.',
+  });
+}
 
 function generateOtp(): string {
   const max = Math.pow(10, OTP_LENGTH);

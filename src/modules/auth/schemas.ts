@@ -24,7 +24,8 @@ export const RequestOtpBody = z.object({
   phone: IndianPhoneSchema,
   countryCode: CountryCodeSchema,
   role: RoleSchema,
-  /** hCaptcha / reCAPTCHA token when required by a previous 400. Optional. */
+  /** hCaptcha token. Required only after a 400 `captcha_required` (the number
+   *  is inside its post-lockout CAPTCHA window and HCAPTCHA_SECRET is set). */
   captchaToken: z.string().min(1).max(4096).optional(),
 });
 export type RequestOtpBody = z.infer<typeof RequestOtpBody>;

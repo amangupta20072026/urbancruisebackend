@@ -91,29 +91,42 @@ export function logDispatchFailure(
 /**
  * Convert a failed dispatch into an `AppError` subclass and throw. Never returns.
  *
- * Mapping rules:
+ * Mapping rules (status codes and `code` values are a contract with the
+ * mobile app — do not change them):
  *   - Provider is temporarily unavailable (wallet empty, breaker open) → 503
  *     with `SERVICE_UNAVAILABLE`. The mobile client shows "try again shortly."
- *   - Provider rejected the request for a reason the user can't fix (config
- *     bug, bad template, our account is throttled) → 409 with `OTP_SEND_FAILED`.
+ *   - Provider is throttling our account → 409 `provider_rate_limited`.
+ *   - Any other provider rejection the user can't fix (config bug, bad
+ *     template, provider outage) → 409 with `OTP_SEND_FAILED`.
+ *
+ * CLIENT MESSAGES ARE FIXED, GENERIC STRINGS (security fix — audit item #9).
+ *   MSG91's raw error text ("Invalid authkey", template ids, account state)
+ *   used to be copied straight into the response. That told any caller how
+ *   our SMS account is configured and when it is broken. The raw text is
+ *   still recorded where operators need it — logDispatchFailure() above and
+ *   the otp_events audit row — but never leaves the server. For the same
+ *   reason the 503 no longer reports *why* (e.g. "wallet_low").
  */
+export const DISPATCH_CLIENT_MESSAGE = {
+  unavailable: 'OTP service is temporarily unavailable. Please try again shortly.',
+  busy: 'Our SMS service is busy right now. Please try again in a minute.',
+  failed: 'We could not send the verification code. Please try again.',
+} as const;
+
 export function throwDispatchError(dispatch: OtpDispatchResult): never {
-  const msg = dispatch.errorMessage ?? 'OTP send failed.';
-  const err = mapDispatchToError(dispatch, msg);
-  throw err;
+  throw mapDispatchToError(dispatch);
 }
 
-function mapDispatchToError(dispatch: OtpDispatchResult, msg: string): AppError {
+function mapDispatchToError(dispatch: OtpDispatchResult): AppError {
   switch (dispatch.failure) {
     case 'wallet_low':
     case 'circuit_open':
       return new ServiceUnavailableError(
-        'OTP service is temporarily unavailable. Please try again shortly.',
+        DISPATCH_CLIENT_MESSAGE.unavailable,
         AUTH_ERROR.SERVICE_UNAVAILABLE,
-        { reason: dispatch.failure },
       );
     case 'rate_limited':
-      return new ConflictError(msg, 'provider_rate_limited');
+      return new ConflictError(DISPATCH_CLIENT_MESSAGE.busy, 'provider_rate_limited');
     case 'template_bad':
     case 'provider_forbidden':
     case 'provider_server_error':
@@ -121,6 +134,6 @@ function mapDispatchToError(dispatch: OtpDispatchResult, msg: string): AppError 
     case 'network':
     case 'unknown':
     default:
-      return new ConflictError(msg, AUTH_ERROR.OTP_SEND_FAILED);
+      return new ConflictError(DISPATCH_CLIENT_MESSAGE.failed, AUTH_ERROR.OTP_SEND_FAILED);
   }
 }

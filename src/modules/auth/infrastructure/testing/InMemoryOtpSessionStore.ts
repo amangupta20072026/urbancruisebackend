@@ -31,6 +31,7 @@ export class InMemoryOtpSessionStore implements IOtpSessionStore {
   // ── Internal state (readable by tests) ──────────────────────────────────
 
   readonly sessions = new Map<string, OtpSession>();
+  readonly otpAttempts = new Map<string, number>();
   readonly idempotencySnapshots = new Map<string, IdempotencySnapshot>();
   readonly lastSentAt = new Map<string, number>();
   readonly sendCounts10m = new Map<string, number>();
@@ -58,6 +59,7 @@ export class InMemoryOtpSessionStore implements IOtpSessionStore {
 
   reset(): void {
     this.sessions.clear();
+    this.otpAttempts.clear();
     this.idempotencySnapshots.clear();
     this.lastSentAt.clear();
     this.sendCounts10m.clear();
@@ -80,8 +82,15 @@ export class InMemoryOtpSessionStore implements IOtpSessionStore {
     return this.sessions.get(requestId) ?? null;
   }
 
-  async deleteOtpSession(requestId: string): Promise<void> {
-    this.sessions.delete(requestId);
+  async deleteOtpSession(requestId: string): Promise<boolean> {
+    this.otpAttempts.delete(requestId);
+    return this.sessions.delete(requestId);
+  }
+
+  async incrementOtpAttempts(requestId: string, _ttlSeconds: number): Promise<number> {
+    const next = (this.otpAttempts.get(requestId) ?? 0) + 1;
+    this.otpAttempts.set(requestId, next);
+    return next;
   }
 
   async getIdempotencySnapshot(idempotencyKey: string): Promise<IdempotencySnapshot | null> {
@@ -96,44 +105,52 @@ export class InMemoryOtpSessionStore implements IOtpSessionStore {
     this.idempotencySnapshots.set(idempotencyKey, snapshot);
   }
 
+  /**
+   * Mirrors SET NX EX: succeeds only when no cooldown is active. A stored
+   * timestamp older than the TTL counts as expired (emulates Redis expiry),
+   * so tests can seed `lastSentAt` with an old value to simulate elapsed time.
+   * Check-and-set happens synchronously, so it is atomic on the event loop.
+   */
+  async tryAcquireSendCooldown(
+    mobile: string,
+    nowMs: number,
+    ttlSeconds: number,
+  ): Promise<boolean> {
+    const prev = this.lastSentAt.get(mobile);
+    if (prev !== undefined && nowMs - prev < ttlSeconds * 1000) return false;
+    this.lastSentAt.set(mobile, nowMs);
+    return true;
+  }
+
+  async releaseSendCooldown(mobile: string): Promise<void> {
+    this.lastSentAt.delete(mobile);
+  }
+
   async getLastSentAt(mobile: string): Promise<number | null> {
     return this.lastSentAt.get(mobile) ?? null;
   }
 
-  async setLastSentAt(mobile: string, nowMs: number, _ttlSeconds: number): Promise<void> {
-    this.lastSentAt.set(mobile, nowMs);
+  async incrementSendCount10m(mobile: string): Promise<number> {
+    return bump(this.sendCounts10m, mobile);
   }
 
-  async getSendCount10m(mobile: string): Promise<number> {
-    return this.sendCounts10m.get(mobile) ?? 0;
+  async incrementSendCountDay(mobile: string): Promise<number> {
+    return bump(this.sendCountsDay, mobile);
   }
 
-  async incrementSendCount10m(mobile: string): Promise<void> {
-    this.sendCounts10m.set(mobile, (this.sendCounts10m.get(mobile) ?? 0) + 1);
+  async refundSendCounts(mobile: string): Promise<void> {
+    for (const m of [this.sendCounts10m, this.sendCountsDay]) {
+      const v = m.get(mobile) ?? 0;
+      if (v > 0) m.set(mobile, v - 1);
+    }
   }
 
-  async getSendCountDay(mobile: string): Promise<number> {
-    return this.sendCountsDay.get(mobile) ?? 0;
+  async incrementSendCountIpBlock(ipBlockKey: string): Promise<number> {
+    return bump(this.sendCountsIpBlock, ipBlockKey);
   }
 
-  async incrementSendCountDay(mobile: string): Promise<void> {
-    this.sendCountsDay.set(mobile, (this.sendCountsDay.get(mobile) ?? 0) + 1);
-  }
-
-  async getSendCountIpBlock(ipBlockKey: string): Promise<number> {
-    return this.sendCountsIpBlock.get(ipBlockKey) ?? 0;
-  }
-
-  async incrementSendCountIpBlock(ipBlockKey: string): Promise<void> {
-    this.sendCountsIpBlock.set(ipBlockKey, (this.sendCountsIpBlock.get(ipBlockKey) ?? 0) + 1);
-  }
-
-  async getSendCountPrefix(prefix: string): Promise<number> {
-    return this.sendCountsPrefix.get(prefix) ?? 0;
-  }
-
-  async incrementSendCountPrefix(prefix: string): Promise<void> {
-    this.sendCountsPrefix.set(prefix, (this.sendCountsPrefix.get(prefix) ?? 0) + 1);
+  async incrementSendCountPrefix(prefix: string): Promise<number> {
+    return bump(this.sendCountsPrefix, prefix);
   }
 
   async incrementVerifyFail(mobile: string, _windowSeconds: number): Promise<number> {
@@ -169,7 +186,7 @@ export class InMemoryOtpSessionStore implements IOtpSessionStore {
     this.activeSessions.delete(`${role}:${entityId}`);
   }
 
-  async denyMandySessions(jtis: string[], _ttlSeconds: number): Promise<void> {
+  async denyManySessions(jtis: string[], _ttlSeconds: number): Promise<void> {
     for (const sid of jtis) this.deniedSids.add(sid);
   }
 
@@ -186,4 +203,12 @@ export class InMemoryOtpSessionStore implements IOtpSessionStore {
     this.onboardingTickets.delete(tokenHash);
     return t;
   }
+}
+
+/** Synchronous read-modify-write: atomic on the single-threaded event loop,
+ *  exactly like a Redis INCR from the caller's point of view. */
+function bump(map: Map<string, number>, key: string): number {
+  const next = (map.get(key) ?? 0) + 1;
+  map.set(key, next);
+  return next;
 }

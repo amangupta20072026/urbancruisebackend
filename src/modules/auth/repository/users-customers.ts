@@ -24,6 +24,7 @@ import { logger } from '../../../shared/logger/index.js';
 import { maskMobile } from '../../../shared/utils/phone.js';
 import { ServiceUnavailableError } from '../../../shared/errors/index.js';
 import { CUSTOMER_CREATE_LOCK_TIMEOUT_SECONDS } from '../../../config/constants.js';
+import { isRawPhoneAdminBlocked } from './mobile-registry.js';
 import type { CustomerOnboardingDetails, ResolvedUser, UserProfileDto } from '../types.js';
 import {
   candidateFormats,
@@ -154,11 +155,15 @@ export async function createCustomerIfAbsent(
  * Status by id — used on refresh and /me
  * -------------------------------------------------------------------------- */
 export async function getCustomerStatusById(id: string): Promise<ResolvedUser['status'] | null> {
+  // `customers` has no status column — the admin block on the phone number
+  // (mobile_registry) is the only way to deactivate a customer.
   const [rows] = await pool.execute<RowDataPacket[]>(
-    'SELECT id FROM customers WHERE id = ? LIMIT 1',
+    'SELECT id, customerPhone FROM customers WHERE id = ? LIMIT 1',
     [id],
   );
-  return rows.length ? 'active' : null;
+  if (!rows.length) return null;
+  const blocked = await isRawPhoneAdminBlocked(rows[0]!['customerPhone'] as string | null);
+  return blocked ? 'inactive' : 'active';
 }
 
 /* --------------------------------------------------------------------------

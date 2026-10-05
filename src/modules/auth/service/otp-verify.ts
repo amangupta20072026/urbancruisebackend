@@ -7,10 +7,16 @@
  * ORDER OF CHECKS (keep this order):
  *   1. Mobile blocked / locked?
  *   2. Load OTP session by requestId; it must belong to this mobile + role.
+ *   2b. ATOMICALLY count this attempt against the OTP (INCR) BEFORE
+ *       comparing. Over OTP_MAX_VERIFY_ATTEMPTS → session burned, reject.
+ *       (Audit fix #2: the old flow read the lock, compared, and only then
+ *       counted — 200 parallel guesses were ALL evaluated.)
  *   3. Compare HMAC(otp) in constant time.
  *        wrong → windowed fail counter; crossing the threshold locks the
  *                number for VERIFY_LOCK_DURATION_SECONDS.
- *   4. Correct → delete the session immediately (single use).
+ *   4. Correct → atomically claim the session (DEL returns 1 for exactly one
+ *      caller). A concurrent duplicate verify gets OTP_EXPIRED, so one OTP
+ *      can never mint two login sessions.
  *   5. Resolve the account for the requested role:
  *        Vendor / UC / Driver  — must exist AND be active, else 403.
  *                                Never created here.
@@ -28,6 +34,8 @@ import {
   VERIFY_FAIL_LOCK_THRESHOLD,
   VERIFY_LOCK_DURATION_SECONDS,
   ONBOARDING_TICKET_TTL_SECONDS,
+  OTP_MAX_VERIFY_ATTEMPTS,
+  OTP_SESSION_TTL_SECONDS,
 } from '../../../config/constants.js';
 import { sha256, safeEqual } from '../../../shared/utils/crypto.js';
 import { AuthError, ForbiddenError, RateLimitError } from '../../../shared/errors/index.js';
@@ -84,6 +92,25 @@ export async function verifyOtp(
     throw new AuthError('That code doesn\u2019t match.', AUTH_ERROR.OTP_INVALID);
   }
 
+  // 2b. Count this attempt atomically BEFORE comparing. Parallel guesses get
+  //     distinct values 1..N from the store, so at most OTP_MAX_VERIFY_ATTEMPTS
+  //     of them are ever compared, regardless of concurrency.
+  const attempt = await store.incrementOtpAttempts(p.requestId, OTP_SESSION_TTL_SECONDS);
+  if (attempt > OTP_MAX_VERIFY_ATTEMPTS) {
+    await store.deleteOtpSession(p.requestId);
+    await audit(deps.audit, {
+      mobile,
+      role: p.role,
+      event: 'verify_failed',
+      ip: p.ip,
+      msg: 'otp_attempts_exhausted',
+    });
+    throw new AuthError(
+      'Too many incorrect attempts. Please request a new code.',
+      AUTH_ERROR.OTP_EXPIRED,
+    );
+  }
+
   // 3. Compare
   if (!safeEqual(hashOtp(p.requestId, p.otp), session.otpHash)) {
     // The Redis counter is windowed (expires VERIFY_FAIL_WINDOW_SECONDS after
@@ -102,8 +129,12 @@ export async function verifyOtp(
     throw new AuthError('That code doesn\u2019t match.', AUTH_ERROR.OTP_INVALID);
   }
 
-  // 4. Single-use
-  await store.deleteOtpSession(p.requestId);
+  // 4. Single-use — atomic claim. Only the caller whose delete removed the
+  //    session may continue; a concurrent duplicate gets OTP_EXPIRED.
+  const claimed = await store.deleteOtpSession(p.requestId);
+  if (!claimed) {
+    throw new AuthError('This OTP has already been used.', AUTH_ERROR.OTP_EXPIRED);
+  }
   await Promise.all([
     audit(deps.audit, { mobile, role: p.role, event: 'verify_succeeded', ip: p.ip }),
     repo.resetVerifyFailure(mobile),

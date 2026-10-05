@@ -79,6 +79,11 @@ export class InMemoryAuthRepository implements IAuthRepository {
   readonly createdSessions: CreateSessionInput[] = [];
   readonly revokedSessions: Array<{ jti: string; reason: string }> = [];
   readonly createdCustomers: Array<{ mobile: string; details: CustomerOnboardingDetails }> = [];
+  readonly deletedPushTokens: Array<{
+    role: UserRole;
+    entityId: string;
+    deviceId: string | null;
+  }> = [];
 
   // ── Seeded state ─────────────────────────────────────────────────────────
 
@@ -124,6 +129,7 @@ export class InMemoryAuthRepository implements IAuthRepository {
     this.createdSessions.length = 0;
     this.revokedSessions.length = 0;
     this.createdCustomers.length = 0;
+    this.deletedPushTokens.length = 0;
     this._users.clear();
     this._mobileFlags.clear();
     this._sessions.clear();
@@ -217,7 +223,13 @@ export class InMemoryAuthRepository implements IAuthRepository {
 
   async getAccountStatus(role: UserRole, entityId: string): Promise<ResolvedUser['status'] | null> {
     const u = [...this._users.values()].find(x => x.role === role && x.entityId === entityId);
-    return u ? u.status : null;
+    if (!u) return null;
+    // Mirrors the MySQL repo: an admin-blocked phone makes customers, drivers
+    // and UC staff 'inactive'. Vendors are governed by their status column.
+    if (role !== 'vendor' && this._mobileFlags.get(u.mobile)?.admin_blocked === 1) {
+      return 'inactive';
+    }
+    return u.status;
   }
 
   // profiles
@@ -310,5 +322,10 @@ export class InMemoryAuthRepository implements IAuthRepository {
   async applyDlr(update: DlrUpdate): Promise<number> {
     this.dlrUpdates.push(update);
     return 1; // always succeeds in tests unless overridden
+  }
+
+  // push tokens
+  async deletePushTokens(role: UserRole, entityId: string, deviceId: string | null): Promise<void> {
+    this.deletedPushTokens.push({ role, entityId, deviceId });
   }
 }

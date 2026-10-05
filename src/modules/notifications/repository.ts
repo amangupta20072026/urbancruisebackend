@@ -12,6 +12,7 @@
  */
 import type { RowDataPacket, ResultSetHeader } from 'mysql2/promise';
 import { pool } from '../../shared/db/pool.js';
+import { withTransaction } from '../../shared/db/transaction.js';
 import type { UserRole } from '../../shared/rbac/roles.js';
 import type {
   PushTokenRow,
@@ -29,6 +30,18 @@ import type {
  * ON DUPLICATE KEY UPDATE keeps the latest token and timestamp.
  * Per Firebase's token management guide:
  *   https://firebase.google.com/docs/cloud-messaging/manage-tokens
+ *
+ * TOKEN OWNERSHIP (security fix — audit item #7):
+ *   An FCM token identifies ONE app install, and it does not change when a
+ *   different person logs in on that phone. Previously, if user A logged out
+ *   (or the logout never reached us) and user B logged in on the same phone,
+ *   both A's and B's rows pointed at the same token — so B's phone kept
+ *   receiving A's booking and payment notifications.
+ *
+ *   Registration now CLAIMS the token: in the same transaction, every other
+ *   row holding this token (another account, or this account under an older
+ *   device_id) is deleted before the upsert. A token can therefore belong to
+ *   exactly one (role, entity_id, device_id) at a time — the latest login.
  */
 export async function upsertPushToken(params: {
   role: UserRole;
@@ -39,26 +52,34 @@ export async function upsertPushToken(params: {
   deviceName?: string;
   appVersion?: string;
 }): Promise<void> {
-  await pool.execute(
-    `INSERT INTO push_tokens
-       (role, entity_id, device_id, fcm_token, platform, device_name, app_version)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE
-       fcm_token   = VALUES(fcm_token),
-       platform    = VALUES(platform),
-       device_name = VALUES(device_name),
-       app_version = VALUES(app_version),
-       updated_at  = CURRENT_TIMESTAMP`,
-    [
-      params.role,
-      params.entityId,
-      params.deviceId,
-      params.fcmToken,
-      params.platform,
-      params.deviceName ?? null,
-      params.appVersion ?? null,
-    ],
-  );
+  await withTransaction(async conn => {
+    await conn.execute(
+      `DELETE FROM push_tokens
+        WHERE fcm_token = ?
+          AND NOT (role = ? AND entity_id = ? AND device_id = ?)`,
+      [params.fcmToken, params.role, params.entityId, params.deviceId],
+    );
+    await conn.execute(
+      `INSERT INTO push_tokens
+         (role, entity_id, device_id, fcm_token, platform, device_name, app_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         fcm_token   = VALUES(fcm_token),
+         platform    = VALUES(platform),
+         device_name = VALUES(device_name),
+         app_version = VALUES(app_version),
+         updated_at  = CURRENT_TIMESTAMP`,
+      [
+        params.role,
+        params.entityId,
+        params.deviceId,
+        params.fcmToken,
+        params.platform,
+        params.deviceName ?? null,
+        params.appVersion ?? null,
+      ],
+    );
+  });
 }
 
 /**

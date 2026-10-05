@@ -13,6 +13,7 @@
  */
 import type { RowDataPacket } from 'mysql2/promise';
 import { pool } from '../../../shared/db/pool.js';
+import { isRawPhoneAdminBlocked } from './mobile-registry.js';
 import type { ResolvedUser, UserProfileDto } from '../types.js';
 import {
   candidateFormats,
@@ -61,14 +62,17 @@ export async function findDriverByPhone(mobile: string): Promise<ResolvedUser | 
 }
 
 /* --------------------------------------------------------------------------
- * Status by id — `drivers` has no status column: exists ⇒ active.
+ * Status by id — `drivers` has no status column, so: missing ⇒ null,
+ * phone admin-blocked in mobile_registry ⇒ 'inactive', otherwise 'active'.
  * -------------------------------------------------------------------------- */
 export async function getDriverStatusById(id: string): Promise<ResolvedUser['status'] | null> {
   const [rows] = await pool.execute<RowDataPacket[]>(
-    'SELECT id FROM drivers WHERE id = ? LIMIT 1',
+    'SELECT id, phone FROM drivers WHERE id = ? LIMIT 1',
     [id],
   );
-  return rows.length ? 'active' : null;
+  if (!rows.length) return null;
+  const blocked = await isRawPhoneAdminBlocked(rows[0]!['phone'] as string | null);
+  return blocked ? 'inactive' : 'active';
 }
 
 /* --------------------------------------------------------------------------

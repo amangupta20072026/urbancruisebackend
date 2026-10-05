@@ -6,6 +6,11 @@
  * deny-list that gives us real-time revocation on top of JWTs' inherent
  * statelessness.
  *
+ * PUSH TOKENS (audit fix #7): whenever a device or a whole account is signed
+ * out — logout, logout-all, forced revoke, refresh-token reuse — the matching
+ * push tokens are deleted too, so a signed-out phone stops receiving that
+ * account's notifications. Cleanup is best-effort and never blocks sign-out.
+ *
  * DESIGN CHANGE (DIP fix):
  *   Accepts AuthServiceDeps instead of importing the concrete redis /
  *   repo singletons. All infrastructure access goes through:
@@ -49,7 +54,10 @@ export async function refreshSession(
   // Reuse detection — revoked jti presented → nuclear: revoke all for entity.
   if (row.revoked_at !== null) {
     const revokedJtis = await repo.revokeAllForEntity(row.role, row.entity_id, 'reuse_detected');
-    await store.denyMandySessions(revokedJtis, ttlToSeconds(ENV.JWT_ACCESS_TTL));
+    await Promise.all([
+      store.denyManySessions(revokedJtis, ttlToSeconds(ENV.JWT_ACCESS_TTL)),
+      clearPushTokens(deps, row.role, row.entity_id, null),
+    ]);
     logger.warn(
       { role: row.role, entityId: row.entity_id, jti: row.jti },
       'refresh token reuse detected — all sessions revoked',
@@ -146,16 +154,23 @@ export async function logout(deps: AuthServiceDeps, p: LogoutParams): Promise<vo
       'all_devices',
     );
     await Promise.all([
-      store.denyMandySessions(revoked, accessTtl),
+      store.denyManySessions(revoked, accessTtl),
       store.clearActiveSessions(p.identityRole, p.identityEntityId),
+      clearPushTokens(deps, p.identityRole, p.identityEntityId, null),
     ]);
     return;
   }
 
+  // Read the session's device BEFORE revoking, so we know which device's
+  // push token to drop.
+  const current = await repo.findSessionByJti(p.identitySessionId);
   await repo.markSessionRevoked(p.identitySessionId, 'logout');
   await Promise.all([
     store.removeActiveSession(p.identityRole, p.identityEntityId, p.identitySessionId),
     store.denySession(p.identitySessionId, accessTtl),
+    current?.device_id
+      ? clearPushTokens(deps, p.identityRole, p.identityEntityId, current.device_id)
+      : Promise.resolve(),
   ]);
 }
 
@@ -228,7 +243,31 @@ async function revokeEverything(
   // Always deny the caller's own sid, even if its DB row is already gone.
   if (currentSid && !revoked.includes(currentSid)) revoked.push(currentSid);
   await Promise.all([
-    store.denyMandySessions(revoked, ttlToSeconds(ENV.JWT_ACCESS_TTL)),
+    store.denyManySessions(revoked, ttlToSeconds(ENV.JWT_ACCESS_TTL)),
     store.clearActiveSessions(role, entityId),
+    clearPushTokens(deps, role, entityId, null),
   ]);
+}
+
+/* ==============================================================================
+ * clearPushTokens — best-effort push-token removal on sign-out
+ * ==============================================================================
+ * Never throws: a failed cleanup must not turn a successful logout or a
+ * security revoke into an error response. The token-claiming upsert in the
+ * notifications module is the backstop if a delete is ever missed.
+ * ============================================================================== */
+async function clearPushTokens(
+  deps: AuthServiceDeps,
+  role: UserRole,
+  entityId: string,
+  deviceId: string | null,
+): Promise<void> {
+  try {
+    await deps.repo.deletePushTokens(role, entityId, deviceId);
+  } catch (err) {
+    logger.warn(
+      { err, role, entityId, scope: deviceId === null ? 'all_devices' : 'one_device' },
+      'push token cleanup on sign-out failed',
+    );
+  }
 }

@@ -1,34 +1,42 @@
 /**
  * ==============================================================================
- * auth.service — OTP send rate limits + counter maintenance
+ * auth.service — OTP send rate limits (atomic reserve-first)
  * ==============================================================================
  * Two exported entry points:
  *
- *   enforceSendRateLimits(store, mobile, ip, isTest)
- *     Read-side check — throws RateLimitError (with retryAfter) the moment
- *     any bucket is over the cap. Called BEFORE we generate/store an OTP
- *     so a rate-limited request never gets a redis session or an SMS.
+ *   reserveSendQuota(store, mobile, ip, isTest)
+ *     Called BEFORE an OTP is generated or any SMS is sent. Atomically claims
+ *     the cooldown and increments every bucket, then compares the
+ *     POST-increment values against the caps. Throws RateLimitError (with
+ *     retryAfter) the moment any bucket is over.
  *
- *   incrementSendCounters(store, mobile, ip, isTest)
- *     Write-side bump — called AFTER a successful (or silent-drop) send.
- *     Increments per-mobile 10m/day counters, sets last-sent timestamp, and
- *     bumps anti-pumping subnet + prefix buckets. Silent-drops go through
- *     this too so they still burn quota — that's what stops attackers from
- *     probing unprovisioned numbers for free.
+ *   refundSendQuota(store, mobile)
+ *     Called ONLY when the provider definitively failed to send. Releases the
+ *     cooldown and gives back one unit of the per-mobile buckets so a real
+ *     user is not locked out by an MSG91 outage they did not cause.
  *
- * DESIGN CHANGE (DIP fix):
- *   Both functions now accept an IOtpSessionStore instead of importing the
- *   concrete redis singleton. This makes the rate-limit logic unit-testable
- *   with InMemoryOtpSessionStore — no Redis needed.
+ * WHY RESERVE-FIRST (security fix — audit item #1):
+ *   The previous design read the counters, sent the SMS, and only THEN
+ *   incremented. N parallel requests all read the same under-cap values and
+ *   all passed — 25 parallel requests produced 25 SMS to one number despite
+ *   the 30 s cooldown (SMS bombing + MSG91 wallet drain).
+ *
+ *   Now:
+ *     • the cooldown is a SET NX — exactly ONE request per window wins it;
+ *     • each counter is an atomic INCR whose returned value is compared, so
+ *       parallel requests receive distinct values 1..N and only those within
+ *       the cap pass.
+ *   A rejected attempt still consumes quota. That is intentional: it is what
+ *   stops attackers from probing for free.
  *
  * Bucket layout:
  *   per-mobile:  cooldown, 10-minute, daily
  *   per-network: /24 (IPv4) or /64 (IPv6) hourly    ← anti SMS-pumping
  *   per-prefix:  first-5 chars of mobile, hourly    ← anti SMS-pumping
  *
- * User-facing error messages for the anti-pumping caps are DELIBERATELY
- * generic ("your network" / "this number range") so we don't leak the
- * bucket identity to a probing attacker.
+ * User-facing messages for the anti-pumping caps are DELIBERATELY generic
+ * ("your network" / "this number range") so we don't leak the bucket
+ * identity to a probing attacker.
  * ==============================================================================
  */
 import type { IOtpSessionStore } from '../ports/IOtpSessionStore.js';
@@ -45,30 +53,30 @@ import { bucketIp } from '../../../shared/utils/ip-bucket.js';
 import { bucketPrefix } from '../../../shared/utils/phone.js';
 
 /* ==============================================================================
- * READ SIDE — throws when any bucket is over cap
+ * RESERVE — atomic claim; throws when any bucket is over cap
  * ============================================================================== */
 
-export async function enforceSendRateLimits(
+export async function reserveSendQuota(
   store: IOtpSessionStore,
   mobile: string,
   ip: string | null,
   isTest: boolean,
 ): Promise<void> {
-  // 1. Cooldown between sends
-  const lastMs = await store.getLastSentAt(mobile);
-  if (lastMs !== null) {
-    const elapsed = (Date.now() - lastMs) / 1000;
-    if (elapsed < OTP_SEND_MIN_INTERVAL_SECONDS) {
-      const retryAfter = Math.ceil(OTP_SEND_MIN_INTERVAL_SECONDS - elapsed);
-      throw new RateLimitError('Please wait before requesting another code.', 'send_cooldown', {
-        retryAfter,
-      });
-    }
+  // 1. Cooldown — SET NX: only one request per window gets through.
+  const now = Date.now();
+  const acquired = await store.tryAcquireSendCooldown(mobile, now, OTP_SEND_MIN_INTERVAL_SECONDS);
+  if (!acquired) {
+    const lastMs = await store.getLastSentAt(mobile);
+    const elapsed = lastMs !== null ? (now - lastMs) / 1000 : 0;
+    const retryAfter = Math.max(1, Math.ceil(OTP_SEND_MIN_INTERVAL_SECONDS - elapsed));
+    throw new RateLimitError('Please wait before requesting another code.', 'send_cooldown', {
+      retryAfter,
+    });
   }
 
-  // 2. 10-minute window
-  const c10 = await store.getSendCount10m(mobile);
-  if (c10 >= OTP_SEND_MAX_PER_10M) {
+  // 2. 10-minute window (post-increment compare)
+  const c10 = await store.incrementSendCount10m(mobile);
+  if (c10 > OTP_SEND_MAX_PER_10M) {
     throw new RateLimitError(
       'Too many requests for this number. Wait a few minutes.',
       'send_limit_10m',
@@ -77,8 +85,8 @@ export async function enforceSendRateLimits(
   }
 
   // 3. Daily
-  const cd = await store.getSendCountDay(mobile);
-  if (cd >= OTP_SEND_MAX_PER_DAY) {
+  const cd = await store.incrementSendCountDay(mobile);
+  if (cd > OTP_SEND_MAX_PER_DAY) {
     throw new RateLimitError('Daily OTP limit reached for this number.', 'send_limit_day', {
       retryAfter: 86_400,
     });
@@ -94,8 +102,8 @@ export async function enforceSendRateLimits(
 
   const ipKey = bucketIp(ip);
   if (ipKey) {
-    const count = await store.getSendCountIpBlock(ipKey);
-    if (count >= OTP_SEND_MAX_PER_IPBLOCK_PER_HOUR) {
+    const count = await store.incrementSendCountIpBlock(ipKey);
+    if (count > OTP_SEND_MAX_PER_IPBLOCK_PER_HOUR) {
       logger.warn(
         {
           alarm: 'otp_ip_block_limit',
@@ -114,8 +122,8 @@ export async function enforceSendRateLimits(
   }
 
   const prefixKey = bucketPrefix(mobile);
-  const prefixCount = await store.getSendCountPrefix(prefixKey);
-  if (prefixCount >= OTP_SEND_MAX_PER_PREFIX_PER_HOUR) {
+  const prefixCount = await store.incrementSendCountPrefix(prefixKey);
+  if (prefixCount > OTP_SEND_MAX_PER_PREFIX_PER_HOUR) {
     logger.warn(
       {
         alarm: 'otp_prefix_limit',
@@ -134,29 +142,22 @@ export async function enforceSendRateLimits(
 }
 
 /* ==============================================================================
- * WRITE SIDE — bump every relevant counter after a successful/silent send
+ * REFUND — only after a definitive provider failure
  * ============================================================================== */
 
-export async function incrementSendCounters(
-  store: IOtpSessionStore,
-  mobile: string,
-  ip: string | null,
-  isTest: boolean,
-): Promise<void> {
-  const jobs: Promise<unknown>[] = [
-    store.setLastSentAt(mobile, Date.now(), OTP_SEND_MIN_INTERVAL_SECONDS + 5),
-    store.incrementSendCount10m(mobile),
-    store.incrementSendCountDay(mobile),
-  ];
-
-  // Anti-pumping counters — test-mobile requests do not bump these.
-  if (!isTest) {
-    const ipKey = bucketIp(ip);
-    if (ipKey) {
-      jobs.push(store.incrementSendCountIpBlock(ipKey));
-    }
-    jobs.push(store.incrementSendCountPrefix(bucketPrefix(mobile)));
+/**
+ * Gives back the cooldown and one unit of the per-mobile buckets. The anti-
+ * pumping buckets (IP block, prefix) are NOT refunded: they are high-volume
+ * abuse caps and refunding them would let an attacker who can induce
+ * provider errors run them indefinitely.
+ *
+ * Best-effort: a refund failure is logged, never surfaced — the user already
+ * gets the real dispatch error.
+ */
+export async function refundSendQuota(store: IOtpSessionStore, mobile: string): Promise<void> {
+  try {
+    await Promise.all([store.releaseSendCooldown(mobile), store.refundSendCounts(mobile)]);
+  } catch (err) {
+    logger.error({ err }, 'otp send: quota refund after provider failure did not complete');
   }
-
-  await Promise.all(jobs);
 }

@@ -15,7 +15,7 @@ import {
 } from '../infrastructure/testing/index.js';
 import { hashOtp } from '../service/otp-hash.js';
 import { RateLimitError } from '../../../shared/errors/index.js';
-import { VERIFY_FAIL_LOCK_THRESHOLD } from '../../../config/constants.js';
+import { VERIFY_FAIL_LOCK_THRESHOLD, OTP_MAX_VERIFY_ATTEMPTS } from '../../../config/constants.js';
 import type { OtpSession, VerifyOtpResponseDto, AuthenticatedResponseDto } from '../types.js';
 
 /* --------------------------------------------------------------------------
@@ -401,5 +401,57 @@ describe('verifyOtp', () => {
     const result = asAuthenticated(await verifyOtp(deps, makeParams({ role: 'vendor' })));
     expect(result.role).toBe('vendor');
     expect(result.subRole).toBe('owner');
+  });
+
+  /* ==========================================================================
+   * REGRESSION — audit item #2 (OTP brute force via parallel guesses).
+   * Before the fix, 200 parallel wrong guesses were ALL compared against the
+   * hash, defeating the 5-attempt lock.
+   * ========================================================================== */
+  describe('per-OTP attempt cap (audit #2 regression)', () => {
+    const wrongGuesses = (n: number) =>
+      Array.from({ length: n }, (_, i) => String(100_000 + i)).filter(g => g !== OTP);
+
+    it('of 200 parallel wrong guesses, at most OTP_MAX_VERIFY_ATTEMPTS are evaluated', async () => {
+      const deps = buildAuthDeps({ store, repo, audit: auditSink });
+      const results = await Promise.allSettled(
+        wrongGuesses(200).map(otp => verifyOtp(deps, makeParams({ otp }))),
+      );
+      const compared = results.filter(
+        r => r.status === 'rejected' && (r.reason as { code: string }).code === 'otp_invalid',
+      ).length;
+      expect(compared).toBeLessThanOrEqual(OTP_MAX_VERIFY_ATTEMPTS);
+      expect(results.every(r => r.status === 'rejected')).toBe(true);
+    });
+
+    it('the CORRECT code is rejected once the attempt cap is exhausted', async () => {
+      const deps = buildAuthDeps({ store, repo, audit: auditSink });
+      store.otpAttempts.set(REQUEST_ID, OTP_MAX_VERIFY_ATTEMPTS);
+      await expect(verifyOtp(deps, makeParams())).rejects.toMatchObject({ code: 'otp_expired' });
+    });
+
+    it('burns the session once the cap is exceeded (a fresh OTP is required)', async () => {
+      const deps = buildAuthDeps({ store, repo, audit: auditSink });
+      store.otpAttempts.set(REQUEST_ID, OTP_MAX_VERIFY_ATTEMPTS);
+      await verifyOtp(deps, makeParams({ otp: '000000' })).catch(() => null);
+      expect(store.sessions.has(REQUEST_ID)).toBe(false);
+    });
+
+    it('the correct code still works within the cap', async () => {
+      const deps = buildAuthDeps({ store, repo, audit: auditSink });
+      store.otpAttempts.set(REQUEST_ID, OTP_MAX_VERIFY_ATTEMPTS - 1);
+      const r = await verifyOtp(deps, makeParams());
+      expect(r.status).toBe('authenticated');
+    });
+
+    it('two parallel verifies with the CORRECT code mint only ONE session', async () => {
+      const deps = buildAuthDeps({ store, repo, audit: auditSink });
+      const results = await Promise.allSettled([
+        verifyOtp(deps, makeParams()),
+        verifyOtp(deps, makeParams()),
+      ]);
+      expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
+      expect(store.getActiveSessions('customer', '42').size).toBe(1);
+    });
   });
 });

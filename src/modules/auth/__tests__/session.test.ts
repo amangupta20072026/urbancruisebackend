@@ -400,3 +400,154 @@ describe('getMe', () => {
     expect(store.isDenied('jti-live')).toBe(true);
   });
 });
+
+/* ==============================================================================
+ * REGRESSION — audit item #6: an admin block must end EXISTING sessions.
+ * Before the fix, customers and drivers were always 'active' on refresh, so a
+ * blocked customer kept refreshing tokens for the full 30-day TTL.
+ * ============================================================================== */
+describe('admin block ends existing sessions (audit #6 regression)', () => {
+  let store: InMemoryOtpSessionStore;
+  let repo: InMemoryAuthRepository;
+
+  beforeEach(() => {
+    store = new InMemoryOtpSessionStore();
+    repo = new InMemoryAuthRepository();
+  });
+
+  it.each(['customer', 'driver', 'uc'] as const)(
+    'refresh is rejected and ALL sessions revoked for a blocked %s',
+    async role => {
+      repo.seedUser({ ...ACTIVE_CUSTOMER_42, role });
+      repo.seedMobileFlags(ACTIVE_CUSTOMER_42.mobile, { admin_blocked: 1 });
+      const token = signRefreshToken({ sub: '42', jti: 'jti-old' });
+      repo.seedSession(baseSessionRow({ role, refresh_token_hash: hashForStorage(token) }));
+
+      const deps = buildAuthDeps({ store, repo, audit: new NoopAuditSink() });
+      await expect(refreshSession(deps, token, DEVICE, null, null)).rejects.toMatchObject({
+        code: 'account_suspended',
+      });
+      expect(repo.revokedSessions.some(r => r.jti === 'jti-old')).toBe(true);
+      expect(store.isDenied('jti-old')).toBe(true);
+    },
+  );
+
+  it('/auth/me is rejected for a blocked customer', async () => {
+    repo.seedUser(ACTIVE_CUSTOMER_42);
+    repo.seedMobileFlags(ACTIVE_CUSTOMER_42.mobile, { admin_blocked: 1 });
+    const deps = buildAuthDeps({ store, repo, audit: new NoopAuditSink() });
+    await expect(
+      getMe(deps, {
+        identityUserId: '42',
+        identityRole: 'customer',
+        identitySubRole: null,
+        identityEntityId: '42',
+        identitySessionId: 'jti-current',
+      }),
+    ).rejects.toMatchObject({ code: 'account_suspended' });
+    expect(store.isDenied('jti-current')).toBe(true);
+  });
+
+  it('an unblocked customer still refreshes normally', async () => {
+    repo.seedUser(ACTIVE_CUSTOMER_42);
+    repo.seedMobileFlags(ACTIVE_CUSTOMER_42.mobile, { admin_blocked: 0 });
+    const token = signRefreshToken({ sub: '42', jti: 'jti-old' });
+    repo.seedSession(baseSessionRow({ refresh_token_hash: hashForStorage(token) }));
+    const deps = buildAuthDeps({ store, repo, audit: new NoopAuditSink() });
+    await expect(refreshSession(deps, token, DEVICE, null, null)).resolves.toHaveProperty(
+      'accessToken',
+    );
+  });
+
+  it('vendors are governed by vendors.status, not by a single blocked phone', async () => {
+    repo.seedUser({ ...ACTIVE_CUSTOMER_42, role: 'vendor', subRole: 'owner' });
+    repo.seedMobileFlags(ACTIVE_CUSTOMER_42.mobile, { admin_blocked: 1 });
+    expect(await repo.getAccountStatus('vendor', '42')).toBe('active');
+  });
+});
+
+/* ==============================================================================
+ * REGRESSION — audit item #7: signing out must remove push tokens, so a
+ * signed-out phone stops receiving that account's notifications.
+ * ============================================================================== */
+describe('push tokens are removed on sign-out (audit #7 regression)', () => {
+  let store: InMemoryOtpSessionStore;
+  let repo: InMemoryAuthRepository;
+
+  beforeEach(() => {
+    store = new InMemoryOtpSessionStore();
+    repo = new InMemoryAuthRepository();
+  });
+
+  it('logout (current) removes only THIS device’s token', async () => {
+    repo.seedSession(baseSessionRow({ jti: 'jti-current', device_id: 'phone-A' }));
+    const deps = buildAuthDeps({ store, repo, audit: new NoopAuditSink() });
+    await logout(deps, {
+      identityRole: 'customer',
+      identityEntityId: '42',
+      identitySessionId: 'jti-current',
+      scope: 'current',
+    });
+    expect(repo.deletedPushTokens).toEqual([
+      { role: 'customer', entityId: '42', deviceId: 'phone-A' },
+    ]);
+  });
+
+  it('logout (all) removes every token for the account', async () => {
+    repo.seedSession(baseSessionRow({ jti: 'jti-A' }));
+    const deps = buildAuthDeps({ store, repo, audit: new NoopAuditSink() });
+    await logout(deps, {
+      identityRole: 'customer',
+      identityEntityId: '42',
+      identitySessionId: 'jti-A',
+      scope: 'all',
+    });
+    expect(repo.deletedPushTokens).toEqual([{ role: 'customer', entityId: '42', deviceId: null }]);
+  });
+
+  it('refresh-token reuse detection removes every token for the account', async () => {
+    repo.seedUser(ACTIVE_CUSTOMER_42);
+    const token = signRefreshToken({ sub: '42', jti: 'jti-old' });
+    repo.seedSession(
+      baseSessionRow({ refresh_token_hash: hashForStorage(token), revoked_at: new Date() }),
+    );
+    const deps = buildAuthDeps({ store, repo, audit: new NoopAuditSink() });
+    await refreshSession(deps, token, DEVICE, null, null).catch(() => null);
+    expect(repo.deletedPushTokens).toContainEqual({
+      role: 'customer',
+      entityId: '42',
+      deviceId: null,
+    });
+  });
+
+  it('a blocked account’s forced revoke removes every token', async () => {
+    repo.seedUser(ACTIVE_CUSTOMER_42);
+    repo.seedMobileFlags(ACTIVE_CUSTOMER_42.mobile, { admin_blocked: 1 });
+    const token = signRefreshToken({ sub: '42', jti: 'jti-old' });
+    repo.seedSession(baseSessionRow({ refresh_token_hash: hashForStorage(token) }));
+    const deps = buildAuthDeps({ store, repo, audit: new NoopAuditSink() });
+    await refreshSession(deps, token, DEVICE, null, null).catch(() => null);
+    expect(repo.deletedPushTokens).toContainEqual({
+      role: 'customer',
+      entityId: '42',
+      deviceId: null,
+    });
+  });
+
+  it('a failing push cleanup never breaks logout', async () => {
+    repo.seedSession(baseSessionRow({ jti: 'jti-current' }));
+    repo.deletePushTokens = async () => {
+      throw new Error('db down');
+    };
+    const deps = buildAuthDeps({ store, repo, audit: new NoopAuditSink() });
+    await expect(
+      logout(deps, {
+        identityRole: 'customer',
+        identityEntityId: '42',
+        identitySessionId: 'jti-current',
+        scope: 'current',
+      }),
+    ).resolves.toBeUndefined();
+    expect(store.isDenied('jti-current')).toBe(true);
+  });
+});

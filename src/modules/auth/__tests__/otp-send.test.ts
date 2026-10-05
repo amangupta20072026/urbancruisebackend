@@ -328,12 +328,55 @@ describe('sendOtp', () => {
     await expect(sendOtp(deps, makeParams())).rejects.toBeInstanceOf(ServiceUnavailableError);
   });
 
-  it('does NOT increment rate-limit counters on dispatch failure', async () => {
+  it('refunds per-mobile quota and releases cooldown on dispatch failure', async () => {
     mockDispatch.mockResolvedValue({ ok: false, failure: 'timeout', attempts: 1 });
     const deps = buildAuthDeps({ store, repo, audit: auditSink });
     await sendOtp(deps, makeParams()).catch(() => null);
-    // audit sink has send_failed, but counters are NOT incremented
-    // incrementSendCounters is only called after successful/silent sends
-    expect(store.sendCounts10m.get('919812345678')).toBeUndefined();
+    // Reserved up front, then refunded because no SMS went out.
+    expect(store.sendCounts10m.get('919812345678')).toBe(0);
+    expect(store.sendCountsDay.get('919812345678')).toBe(0);
+    expect(store.lastSentAt.has('919812345678')).toBe(false);
+    // ...and no orphaned OTP session is left behind.
+    expect(store.sessions.size).toBe(0);
+  });
+
+  it('user can retry immediately after a provider failure', async () => {
+    const deps = buildAuthDeps({ store, repo, audit: auditSink });
+    mockDispatch.mockResolvedValueOnce({ ok: false, failure: 'timeout', attempts: 2 });
+    await sendOtp(deps, makeParams()).catch(() => null);
+    mockDispatch.mockResolvedValueOnce(SUCCESS_DISPATCH);
+    await expect(sendOtp(deps, makeParams())).resolves.toMatchObject({ channel: 'sms' });
+  });
+
+  /* ==========================================================================
+   * REGRESSION — audit item #1. Before the fix, 25 parallel requests for one
+   * number produced 25 SMS despite the 30-second cooldown.
+   * ========================================================================== */
+  it('parallel requests for one number send exactly ONE SMS', async () => {
+    mockDispatch.mockClear();
+    mockDispatch.mockImplementation(async () => {
+      await new Promise(r => setTimeout(r, 20)); // realistic provider latency
+      return SUCCESS_DISPATCH;
+    });
+    const deps = buildAuthDeps({ store, repo, audit: auditSink });
+    const results = await Promise.allSettled(
+      Array.from({ length: 25 }, () => sendOtp(deps, makeParams())),
+    );
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
+    const rejected = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[];
+    expect(rejected.every(r => (r.reason as RateLimitError).code === 'send_cooldown')).toBe(true);
+  });
+
+  it('a number cannot receive more than OTP_SEND_MAX_PER_DAY SMS in a day', async () => {
+    mockDispatch.mockClear();
+    mockDispatch.mockResolvedValue(SUCCESS_DISPATCH);
+    const deps = buildAuthDeps({ store, repo, audit: auditSink });
+    for (let i = 0; i < OTP_SEND_MAX_PER_DAY + 5; i += 1) {
+      store.lastSentAt.clear(); // simulate cooldown elapsing
+      store.sendCounts10m.clear(); // simulate 10-minute window rolling
+      await sendOtp(deps, makeParams()).catch(() => null);
+    }
+    expect(mockDispatch).toHaveBeenCalledTimes(OTP_SEND_MAX_PER_DAY);
   });
 });

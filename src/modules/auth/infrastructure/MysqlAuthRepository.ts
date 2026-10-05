@@ -53,6 +53,7 @@ import {
 } from '../repository/sessions.js';
 
 import { insertOtpEvent, insertLoginEvent, applyDlr } from '../repository/audit.js';
+import { deletePushTokens } from '../repository/push-tokens.js';
 
 export class MysqlAuthRepository implements IAuthRepository {
   // ── mobile_registry ─────────────────────────────────────────────────────
@@ -127,6 +128,12 @@ export class MysqlAuthRepository implements IAuthRepository {
 
   rotateSession(oldJti: string, next: CreateSessionInput): Promise<boolean> {
     return rotateSession(oldJti, next);
+  }
+
+  // ── push tokens ──────────────────────────────────────────────────────────
+
+  deletePushTokens(role: UserRole, entityId: string, deviceId: string | null): Promise<void> {
+    return deletePushTokens(role, entityId, deviceId);
   }
 
   // ── audit ────────────────────────────────────────────────────────────────

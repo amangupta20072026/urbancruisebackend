@@ -15,14 +15,17 @@
  *   POST /auth/logout        — revoke current or all sessions
  *
  * NOTE on rate-limit stacking: the global rate limit runs first (in app.ts).
- * The stricter per-endpoint limiter added here layers on top — matches what
- * the failure matrix asks for on the auth surface.
+ * The stricter per-endpoint limiters added here layer on top — matches what
+ * the failure matrix asks for on the auth surface. All of them are
+ * Redis-backed via createRateLimiter(), so the limits hold across every PM2
+ * worker (audit fix #5 — they used to be per-process).
  * ==============================================================================
  */
 import { Router } from 'express';
-import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import { ipKeyGenerator } from 'express-rate-limit';
 import { validate } from '../../shared/http/middleware/validate.js';
 import { authenticate } from '../../shared/http/middleware/authenticate.js';
+import { createRateLimiter } from '../../shared/http/middleware/rateLimit.js';
 import { ENV } from '../../config/env.js';
 import {
   RequestOtpBody,
@@ -46,27 +49,22 @@ const router = Router();
  * Stricter limiter for the OTP surface — the global one is too permissive
  * for an endpoint that costs money per call.
  */
-const otpLimiter = rateLimit({
+const otpLimiter = createRateLimiter({
+  name: 'auth-otp',
   windowMs: 15 * 60 * 1000,
-  max: ENV.RATE_LIMIT_AUTH_MAX,
-  standardHeaders: true,
-  legacyHeaders: false,
+  limit: ENV.RATE_LIMIT_AUTH_MAX,
+  message: 'Too many requests. Please wait and try again.',
   // Key by IP + phone-in-body — an attacker who rotates IP but hammers one
   // number still trips the limiter. Redis-backed per-mobile limits inside
   // the service catch phone-only enumeration.
-  // NOTE: `ipKeyGenerator(req.ip)` is required by express-rate-limit v7 —
-  // it normalises IPv6 to a /64 prefix so IPv6 users can't bypass by
-  // rotating the interface identifier.
+  // NOTE: `ipKeyGenerator(req.ip)` normalises IPv6 to a /64 prefix so IPv6
+  // users can't bypass the limit by rotating the interface identifier.
   keyGenerator: req => {
     const ipKey = ipKeyGenerator(req.ip ?? '');
-    const phone = String((req.body as { phone?: string })?.phone ?? '');
+    // Runs BEFORE validate(), so `phone` is raw client input. Cap its length:
+    // it becomes part of a Redis key, and a real phone is 10 digits.
+    const phone = String((req.body as { phone?: unknown })?.phone ?? '').slice(0, 16);
     return `${ipKey}:${phone}`;
-  },
-  message: {
-    error: {
-      code: 'RATE_LIMITED',
-      message: 'Too many requests. Please wait and try again.',
-    },
   },
 });
 
@@ -76,18 +74,11 @@ router.post('/otp/verify', otpLimiter, validate({ body: VerifyOtpBody }), postVe
 
 /** Onboarding: keyed by IP only (no phone in the body). The ticket itself is
  *  single-use, so this limiter only guards against token-guessing floods. */
-const onboardLimiter = rateLimit({
+const onboardLimiter = createRateLimiter({
+  name: 'auth-onboard',
   windowMs: 15 * 60 * 1000,
-  max: ENV.RATE_LIMIT_AUTH_MAX,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: req => ipKeyGenerator(req.ip ?? ''),
-  message: {
-    error: {
-      code: 'RATE_LIMITED',
-      message: 'Too many requests. Please wait and try again.',
-    },
-  },
+  limit: ENV.RATE_LIMIT_AUTH_MAX,
+  message: 'Too many requests. Please wait and try again.',
 });
 
 router.post(

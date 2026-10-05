@@ -15,6 +15,7 @@
  *   sessions:*   — per-entity active session index
  *   health:*     — provider health mirror (populated by BullMQ pollers)
  *   cb:*         — circuit-breaker state
+ *   rl:*         — HTTP rate-limiter buckets (shared across PM2 workers)
  * ==============================================================================
  */
 
@@ -27,11 +28,17 @@ import type { UserRole } from '../rbac/roles.js';
 /** Full OTP session — hash {mobile, otpHash, role, requestId, attempts, channel}. TTL = OTP_SESSION_TTL_SECONDS. */
 export const otpSession = (requestId: string): string => `otp:session:${requestId}`;
 
+/** Verify-attempt counter for ONE OTP session. Incremented atomically BEFORE
+ *  the code is compared, so parallel guesses cannot exceed the per-OTP cap.
+ *  TTL = OTP_SESSION_TTL_SECONDS; deleted together with the session. */
+export const otpAttempts = (requestId: string): string => `otp:attempts:${requestId}`;
+
 /** Rate-limit counters per mobile (windowed). */
 export const otpRateMobile10m = (mobile: string): string => `otp:rate:mobile:${mobile}:10m`;
 export const otpRateMobileDay = (mobile: string): string => `otp:rate:mobile:${mobile}:1d`;
 
-/** Last-send timestamp per mobile — used to enforce the 30-second cooldown. */
+/** Resend cooldown per mobile. Written with SET NX EX — its existence IS the
+ *  cooldown (atomic); the stored value is the send time, used for Retry-After. */
 export const otpLastSent = (mobile: string): string => `otp:lastsent:${mobile}`;
 
 /** Rate-limit per source IP (per hour). */
@@ -91,6 +98,14 @@ export const sessionsActive = (role: UserRole, entityId: string): string =>
  * ----------------------------------------------------------------- */
 
 export const healthMsg91Wallet = (): string => 'health:msg91:wallet';
+
+/* -----------------------------------------------------------------
+ * HTTP rate limiters (express-rate-limit + rate-limit-redis)
+ * -----------------------------------------------------------------
+ * One prefix per named limiter, shared by every PM2 worker. The store
+ * appends the client key (IP, or IP:phone for the OTP limiter).
+ * ----------------------------------------------------------------- */
+export const rateLimitPrefix = (limiterName: string): string => `rl:${limiterName}:`;
 
 /* -----------------------------------------------------------------
  * Circuit breakers

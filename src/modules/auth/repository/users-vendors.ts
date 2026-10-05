@@ -88,6 +88,14 @@ function deriveVendorSubRole(v: VendorRow, fmts: string[]): SubRole {
 /* --------------------------------------------------------------------------
  * Status by id — used on refresh and /me so a vendor deactivated in the web
  * app loses access at the next token refresh.
+ *
+ * Unlike customers / drivers / UC staff, this deliberately does NOT consult
+ * mobile_registry.admin_blocked: one vendor row carries up to four phones
+ * (phone, owner_phone, manager_phone1/2) and a session does not record which
+ * of them logged in. "Any phone blocked ⇒ vendor inactive" would log the
+ * owner out because one manager's number was blocked. To cut off a vendor,
+ * set vendors.status; a blocked individual phone is still refused at its
+ * next OTP login.
  * -------------------------------------------------------------------------- */
 export async function getVendorStatusById(id: string): Promise<ResolvedUser['status'] | null> {
   const [rows] = await pool.execute<RowDataPacket[]>(

@@ -49,6 +49,13 @@ export const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60;
  *  within this window locks the number for VERIFY_LOCK_DURATION_SECONDS. */
 export const VERIFY_FAIL_WINDOW_SECONDS = 15 * 60; // 15 min
 export const VERIFY_FAIL_LOCK_THRESHOLD = 5;
+
+/** Max verify attempts against ONE OTP (one requestId), enforced atomically
+ *  BEFORE the code is compared. This is the hard brute-force bound: however
+ *  many guesses arrive in parallel, at most this many are ever evaluated per
+ *  OTP. Combined with OTP_SEND_MAX_PER_DAY it caps guesses per number per
+ *  day at 5 × 10 = 50 (≈ 1 in 20,000 odds for a 6-digit code). */
+export const OTP_MAX_VERIFY_ATTEMPTS = 5;
 export const VERIFY_LOCK_DURATION_SECONDS = 15 * 60; // 15 min
 
 /* ==============================================================================
@@ -89,10 +96,12 @@ export const VENDOR_NULL_STATUS_IS_ACTIVE = true;
  * OTP send rate limits (per mobile). Enforced in Redis before hitting MSG91.
  * ============================================================================== */
 
-/** Max OTP sends per mobile per 10 minutes. 3*/
-export const OTP_SEND_MAX_PER_10M = 30;
-/** Max OTP sends per mobile per day. 10*/
-export const OTP_SEND_MAX_PER_DAY = 100;
+/** Max OTP sends per mobile per 10 minutes.
+ *  PRODUCTION VALUE — do not raise for local testing; add the number to
+ *  MSG91_TEST_MOBILES instead (test mobiles skip SMS entirely). */
+export const OTP_SEND_MAX_PER_10M = 3;
+/** Max OTP sends per mobile per day. PRODUCTION VALUE — see note above. */
+export const OTP_SEND_MAX_PER_DAY = 10;
 /** Hard cooldown between two consecutive sends to the same mobile. */
 export const OTP_SEND_MIN_INTERVAL_SECONDS = 30;
 

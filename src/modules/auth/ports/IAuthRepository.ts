@@ -12,6 +12,7 @@
  *   3. profiles         — profile DTO loaders (for /verify response and /me)
  *   4. sessions         — auth_sessions CRUD + atomic rotation
  *   5. audit            — otp_events + login_events inserts, DLR updates
+ *   6. push tokens      — cleanup of push_tokens on sign-out
  *
  * IMPLEMENTATIONS
  *   MysqlAuthRepository   — wraps the mysql2 pool (production)
@@ -77,6 +78,14 @@ export interface IAuthRepository {
   /** Atomically revoke oldJti and create next. Returns false (and creates
    *  nothing) when oldJti was already revoked by a concurrent refresh. */
   rotateSession(oldJti: string, next: CreateSessionInput): Promise<boolean>;
+
+  // ── push tokens (cleanup on sign-out) ─────────────────────────────────────
+
+  /**
+   * Delete push tokens for one account so a signed-out device stops
+   * receiving its notifications. `deviceId` null = every device.
+   */
+  deletePushTokens(role: UserRole, entityId: string, deviceId: string | null): Promise<void>;
 
   // ── audit ─────────────────────────────────────────────────────────────────
 

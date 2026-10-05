@@ -11,10 +11,13 @@
  *                                       rather than replaying someone else's
  *                                       response.
  *   2. Mobile registry hard blocks    — admin block, lock, captcha.
- *   3. Rate limits                     — per-mobile + SMS-pumping caps
- *                                       (IP block, number prefix). Checked
- *                                       BEFORE the account lookup so the
- *                                       lookup itself is throttled.
+ *   3. Reserve rate-limit quota        — ATOMIC: cooldown via SET NX, then
+ *                                       INCR every bucket and compare the
+ *                                       post-increment value. Done BEFORE
+ *                                       the account lookup (so the lookup is
+ *                                       throttled) and BEFORE any SMS (so
+ *                                       parallel requests cannot all slip
+ *                                       through — audit fix #1).
  *   4. Vendor / UC / Driver gate       — the account MUST already exist in
  *                                       its table and be active. Otherwise
  *                                       403 ACCOUNT_NOT_PROVISIONED /
@@ -29,11 +32,11 @@
  *                                       an OTP, so this endpoint reveals
  *                                       nothing about customer accounts.
  *   5. Generate OTP, HMAC it, store the session.
- *   6. MSG91 dispatch — skipped for test mobiles.
+ *   6. MSG91 dispatch — skipped for test mobiles. On a definitive provider
+ *      failure the per-mobile quota is refunded (user may retry at once).
  *   7. Insert otp_events row (via audit sink).
- *   8. Bump send counters.
- *   9. Snapshot response for idempotency.
- *  10. Best-effort mobile_registry touch.
+ *   8. Snapshot response for idempotency.
+ *   9. Best-effort mobile_registry touch.
  *
  * DESIGN CHANGE (DIP fix):
  *   Accepts AuthServiceDeps instead of importing the concrete redis /
@@ -61,7 +64,7 @@ import { AUTH_ERROR } from '../types.js';
 import type { OtpSession, RequestOtpResponseDto } from '../types.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
 import type { AuthServiceDeps } from '../infrastructure/AuthContainer.js';
-import { enforceSendRateLimits, incrementSendCounters } from './rate-limits.js';
+import { reserveSendQuota, refundSendQuota } from './rate-limits.js';
 import { hashOtp } from './otp-hash.js';
 import { logDispatchFailure, throwDispatchError } from './dispatch-outcome.js';
 import { audit } from './audit.js';
@@ -140,16 +143,17 @@ export async function sendOtp(
     );
   }
 
-  // 3. Rate limits (before the account lookup, so probing is throttled)
-  await enforceSendRateLimits(store, mobile, p.ip, isTest);
+  // 3. Reserve quota atomically (before the account lookup, so probing is
+  //    throttled, and before any SMS, so parallel requests can't race past).
+  await reserveSendQuota(store, mobile, p.ip, isTest);
 
   // 4. Vendor / UC / Driver must be a pre-existing, active account.
   if (p.role !== 'customer') {
     const account = await repo.findUserByPhone(p.role, mobile);
     if (!account || account.status !== 'active') {
       const reason = account ? 'inactive' : 'not_provisioned';
-      // Burn quota so this endpoint can't be used as a free lookup oracle.
-      await incrementSendCounters(store, mobile, p.ip, isTest);
+      // Quota was already consumed in step 3 and is deliberately NOT refunded,
+      // so this endpoint can't be used as a free lookup oracle.
       await audit(deps.audit, {
         mobile,
         role: p.role,
@@ -207,6 +211,9 @@ export async function sendOtp(
 
     if (!dispatch.ok) {
       logDispatchFailure(mobile, p.role, dispatch);
+      // Nothing was sent: drop the now-useless OTP session and give the user
+      // their quota back so an MSG91 outage doesn't lock them out.
+      await Promise.all([store.deleteOtpSession(requestId), refundSendQuota(store, mobile)]);
       await audit(deps.audit, {
         mobile,
         role: p.role,
@@ -248,9 +255,6 @@ export async function sendOtp(
     ip: p.ip,
   });
 
-  // 8. Rate-limit counter bump
-  await incrementSendCounters(store, mobile, p.ip, isTest);
-
   const response: RequestOtpResponseDto = {
     requestId,
     resendAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
@@ -258,14 +262,18 @@ export async function sendOtp(
     testMode: isTest,
   };
 
-  // 9. Idempotency snapshot
+  // 8. Idempotency snapshot
   if (p.idempotencyKey) {
     const fp = sha256(`${mobile}|${p.role}`);
     await store.setIdempotencySnapshot(p.idempotencyKey, { fp, response }, IDEMPOTENCY_TTL_SECONDS);
   }
 
-  // 10. Best-effort mobile registry touch
-  void repo.touchMobileRegistry(mobile);
+  // 9. Best-effort mobile registry touch
+  // MUST catch: server.ts treats an unhandled rejection as fatal, so an
+  // uncaught DB blip here would take the whole worker down.
+  repo.touchMobileRegistry(mobile).catch((err: unknown) => {
+    logger.warn({ err, mobile: maskMobile(mobile) }, 'otp send: mobile_registry touch failed');
+  });
 
   return response;
 }

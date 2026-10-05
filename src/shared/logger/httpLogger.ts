@@ -14,6 +14,7 @@ import { pinoHttp } from 'pino-http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { HEADER_REQUEST_ID } from '../../config/constants.js';
 import { logger } from './index.js';
+import { redactUrl } from './redactUrl.js';
 
 const SLOW_MS = 1000;
 
@@ -44,7 +45,8 @@ export const httpLogger = pinoHttp({
       return {
         id: req.id,
         method: req.method,
-        url: req.url,
+        // Never log raw: some paths carry secrets (see redactUrl.ts).
+        url: redactUrl(req.url),
         remoteAddress: req.remoteAddress,
         userAgent: req.headers?.['user-agent'],
       };

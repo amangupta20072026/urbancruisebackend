@@ -71,9 +71,23 @@ export interface IOtpSessionStore {
 
   /**
    * Delete an OTP session immediately (single-use enforcement after
-   * successful verify).
+   * successful verify) together with its attempt counter.
+   *
+   * Returns true ONLY for the caller whose delete actually removed the
+   * session. Two concurrent verifies with the correct code both reach this
+   * call; exactly one gets `true` and may mint a login session — the other
+   * must be rejected. This is the atomic "claim" of the OTP.
    */
-  deleteOtpSession(requestId: string): Promise<void>;
+  deleteOtpSession(requestId: string): Promise<boolean>;
+
+  /**
+   * ATOMICALLY increment the verify-attempt counter for one OTP session and
+   * return the new value. Called BEFORE the code is compared, so N parallel
+   * guesses receive the values 1..N and only the first OTP_MAX_VERIFY_ATTEMPTS
+   * are ever evaluated. TTL (set on first increment) should match the
+   * session's TTL.
+   */
+  incrementOtpAttempts(requestId: string, ttlSeconds: number): Promise<number>;
 
   // ── Idempotency ───────────────────────────────────────────────────────────
 
@@ -93,68 +107,67 @@ export interface IOtpSessionStore {
   ): Promise<void>;
 
   // ── Rate-limit counters (per-mobile) ──────────────────────────────────────
+  //
+  // CONCURRENCY CONTRACT — every method below is a single atomic operation.
+  // There are deliberately NO separate "read the counter" methods: a
+  // read-then-write check lets N parallel requests all observe the same
+  // under-cap value and all pass (that was the SMS-bombing race). Callers
+  // must increment FIRST and compare the returned post-increment value.
 
   /**
-   * Returns the Unix-ms timestamp of the last successful send to `mobile`, or
-   * null if no send has been recorded within the cooldown window.
+   * Try to start the resend cooldown for `mobile` (Redis: SET NX EX).
+   * Returns true for exactly ONE caller per cooldown window; every concurrent
+   * or subsequent caller gets false until `ttlSeconds` elapse. Stores `nowMs`
+   * so a loser can compute its Retry-After.
+   */
+  tryAcquireSendCooldown(mobile: string, nowMs: number, ttlSeconds: number): Promise<boolean>;
+
+  /**
+   * Release the cooldown early. Only used when the provider definitively
+   * failed to send, so the user may retry immediately.
+   */
+  releaseSendCooldown(mobile: string): Promise<void>;
+
+  /**
+   * Unix-ms timestamp stored by the winning tryAcquireSendCooldown, or null.
+   * Informational only (Retry-After hint) — never used for the allow/deny
+   * decision.
    */
   getLastSentAt(mobile: string): Promise<number | null>;
 
   /**
-   * Record a send timestamp and set the cooldown TTL.
+   * Atomically increment the 10-minute counter and return the NEW value.
+   * TTL (600 s) is set on first increment, inside the same atomic step.
    */
-  setLastSentAt(mobile: string, nowMs: number, ttlSeconds: number): Promise<void>;
+  incrementSendCount10m(mobile: string): Promise<number>;
 
   /**
-   * Read the send count within the 10-minute window. Returns 0 when the key
-   * doesn't exist (window hasn't started).
+   * Atomically increment the daily counter and return the NEW value.
+   * TTL (86 400 s) is set on first increment, inside the same atomic step.
    */
-  getSendCount10m(mobile: string): Promise<number>;
+  incrementSendCountDay(mobile: string): Promise<number>;
 
   /**
-   * Increment the 10-minute send counter. If this is the first increment,
-   * the implementation sets the 600-second TTL.
+   * Refund one unit of the per-mobile 10-minute and daily counters (never
+   * below zero). Used only when the provider definitively failed, so a real
+   * user is not locked out by an MSG91 outage they did not cause.
    */
-  incrementSendCount10m(mobile: string): Promise<void>;
-
-  /**
-   * Read the daily send count. Returns 0 when the key doesn't exist.
-   */
-  getSendCountDay(mobile: string): Promise<number>;
-
-  /**
-   * Increment the daily send counter. If this is the first increment, sets
-   * the 86 400-second TTL.
-   */
-  incrementSendCountDay(mobile: string): Promise<void>;
+  refundSendCounts(mobile: string): Promise<void>;
 
   // ── Rate-limit counters (anti-pumping) ────────────────────────────────────
 
   /**
-   * Read the hourly send count for an IP-block bucket (IPv4 /24 or IPv6 /64).
-   * `ipBlockKey` is already bucketed (e.g. "v4:203.0.113"). Returns 0 when
-   * the key doesn't exist.
+   * Atomically increment the IP-block hourly counter (IPv4 /24 or IPv6 /64,
+   * already bucketed e.g. "v4:203.0.113") and return the NEW value. TTL
+   * (3 600 s) is set on first increment.
    */
-  getSendCountIpBlock(ipBlockKey: string): Promise<number>;
+  incrementSendCountIpBlock(ipBlockKey: string): Promise<number>;
 
   /**
-   * Increment the IP-block hourly counter. Sets a 3 600-second TTL on first
-   * increment.
+   * Atomically increment the number-prefix hourly counter and return the NEW
+   * value. TTL (3 600 s) is set on first increment.
    */
-  incrementSendCountIpBlock(ipBlockKey: string): Promise<void>;
-
-  /**
-   * Read the hourly send count for a number-prefix bucket. `prefix` is the
-   * first OTP_PREFIX_LENGTH characters of the E.164-without-plus mobile.
-   * Returns 0 when the key doesn't exist.
-   */
-  getSendCountPrefix(prefix: string): Promise<number>;
-
-  /**
-   * Increment the number-prefix hourly counter. Sets a 3 600-second TTL on
-   * first increment.
-   */
-  incrementSendCountPrefix(prefix: string): Promise<void>;
+  incrementSendCountPrefix(prefix: string): Promise<number>;
 
   // ── Verify-fail fast counter ──────────────────────────────────────────────
 
@@ -206,7 +219,7 @@ export interface IOtpSessionStore {
    * Add multiple jtis to the deny-list concurrently (used by logout-all and
    * token-reuse detection to revoke every active access token at once).
    */
-  denyMandySessions(jtis: string[], ttlSeconds: number): Promise<void>;
+  denyManySessions(jtis: string[], ttlSeconds: number): Promise<void>;
 
   // ── Customer onboarding tickets ───────────────────────────────────────────
 

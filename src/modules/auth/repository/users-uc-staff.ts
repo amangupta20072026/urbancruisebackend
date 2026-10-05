@@ -11,6 +11,7 @@
  */
 import type { RowDataPacket } from 'mysql2/promise';
 import { pool } from '../../../shared/db/pool.js';
+import { isRawPhoneAdminBlocked } from './mobile-registry.js';
 import type { ResolvedUser, UserProfileDto } from '../types.js';
 import {
   candidateFormats,
@@ -59,11 +60,14 @@ export async function findUcStaffByPhone(mobile: string): Promise<ResolvedUser |
  * -------------------------------------------------------------------------- */
 export async function getUcStaffStatusById(id: string): Promise<ResolvedUser['status'] | null> {
   const [rows] = await pool.execute<UcStaffRow[]>(
-    'SELECT id, status FROM uc_staff WHERE id = ? LIMIT 1',
+    'SELECT id, status, mobile FROM uc_staff WHERE id = ? LIMIT 1',
     [id],
   );
   if (!rows.length) return null;
-  return normStatus(rows[0]!.status, { nullIsActive: false });
+  const r = rows[0]!;
+  if (normStatus(r.status, { nullIsActive: false }) !== 'active') return 'inactive';
+  // A staff row can still be 'active' while its number is admin-blocked.
+  return (await isRawPhoneAdminBlocked(r.mobile)) ? 'inactive' : 'active';
 }
 
 /* --------------------------------------------------------------------------

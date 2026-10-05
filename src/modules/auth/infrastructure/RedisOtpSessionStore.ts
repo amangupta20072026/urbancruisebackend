@@ -16,6 +16,7 @@ import type { UserRole } from '../../../shared/rbac/roles.js';
 import { redis } from '../../../shared/redis/client.js';
 import {
   otpSession,
+  otpAttempts,
   idempotencySnapshot,
   otpLastSent,
   otpRateMobile10m,
@@ -27,6 +28,29 @@ import {
   sessionsActive,
   onboardingTicket,
 } from '../../../shared/redis/keys.js';
+
+/**
+ * INCR + EXPIRE as ONE atomic step. Sets the TTL on the first increment, and
+ * also repairs a key that somehow has no TTL (TTL = -1) so a counter can
+ * never become permanent and lock a number out forever.
+ *   KEYS[1] = counter key, ARGV[1] = ttl seconds. Returns the new value.
+ */
+const INCR_WITH_TTL = `
+local n = redis.call('INCR', KEYS[1])
+if n == 1 or redis.call('TTL', KEYS[1]) < 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return n`;
+
+/** DECR that never goes below zero and never creates a key. KEYS[1] = counter. */
+const DECR_FLOOR_ZERO = `
+local v = tonumber(redis.call('GET', KEYS[1]) or '0')
+if v > 0 then return redis.call('DECR', KEYS[1]) end
+return 0`;
+
+async function incrWithTtl(key: string, ttlSeconds: number): Promise<number> {
+  return Number(await redis.eval(INCR_WITH_TTL, 1, key, ttlSeconds));
+}
 
 export class RedisOtpSessionStore implements IOtpSessionStore {
   // ── OTP sessions ────────────────────────────────────────────────────────
@@ -41,8 +65,17 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
     return JSON.parse(raw) as OtpSession;
   }
 
-  async deleteOtpSession(requestId: string): Promise<void> {
-    await redis.del(otpSession(requestId));
+  async deleteOtpSession(requestId: string): Promise<boolean> {
+    // Delete the session key ON ITS OWN so DEL's count tells us whether THIS
+    // call removed it. Redis serialises the DELs: exactly one concurrent
+    // caller sees 1 (the claim); every other caller sees 0.
+    const removed = await redis.del(otpSession(requestId));
+    await redis.del(otpAttempts(requestId));
+    return removed === 1;
+  }
+
+  async incrementOtpAttempts(requestId: string, ttlSeconds: number): Promise<number> {
+    return incrWithTtl(otpAttempts(requestId), ttlSeconds);
   }
 
   // ── Idempotency ─────────────────────────────────────────────────────────
@@ -66,70 +99,55 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
     );
   }
 
-  // ── Rate-limit counters (per-mobile) ────────────────────────────────────
+  // ── Rate-limit counters (per-mobile) — all atomic ──────────────────────
+
+  async tryAcquireSendCooldown(
+    mobile: string,
+    nowMs: number,
+    ttlSeconds: number,
+  ): Promise<boolean> {
+    const res = await redis.set(otpLastSent(mobile), String(nowMs), 'EX', ttlSeconds, 'NX');
+    return res === 'OK';
+  }
+
+  async releaseSendCooldown(mobile: string): Promise<void> {
+    await redis.del(otpLastSent(mobile));
+  }
 
   async getLastSentAt(mobile: string): Promise<number | null> {
     const raw = await redis.get(otpLastSent(mobile));
     return raw !== null ? Number(raw) : null;
   }
 
-  async setLastSentAt(mobile: string, nowMs: number, ttlSeconds: number): Promise<void> {
-    await redis.set(otpLastSent(mobile), String(nowMs), 'EX', ttlSeconds);
+  async incrementSendCount10m(mobile: string): Promise<number> {
+    return incrWithTtl(otpRateMobile10m(mobile), 600);
   }
 
-  async getSendCount10m(mobile: string): Promise<number> {
-    const raw = await redis.get(otpRateMobile10m(mobile));
-    return raw !== null ? Number(raw) : 0;
+  async incrementSendCountDay(mobile: string): Promise<number> {
+    return incrWithTtl(otpRateMobileDay(mobile), 86_400);
   }
 
-  async incrementSendCount10m(mobile: string): Promise<void> {
-    const k = otpRateMobile10m(mobile);
-    const n = await redis.incr(k);
-    if (n === 1) await redis.expire(k, 600);
+  async refundSendCounts(mobile: string): Promise<void> {
+    await Promise.all([
+      redis.eval(DECR_FLOOR_ZERO, 1, otpRateMobile10m(mobile)),
+      redis.eval(DECR_FLOOR_ZERO, 1, otpRateMobileDay(mobile)),
+    ]);
   }
 
-  async getSendCountDay(mobile: string): Promise<number> {
-    const raw = await redis.get(otpRateMobileDay(mobile));
-    return raw !== null ? Number(raw) : 0;
+  // ── Rate-limit counters (anti-pumping) — all atomic ─────────────────────
+
+  async incrementSendCountIpBlock(ipBlockKey: string): Promise<number> {
+    return incrWithTtl(otpRateIpBlock(ipBlockKey), 3_600);
   }
 
-  async incrementSendCountDay(mobile: string): Promise<void> {
-    const k = otpRateMobileDay(mobile);
-    const n = await redis.incr(k);
-    if (n === 1) await redis.expire(k, 86_400);
-  }
-
-  // ── Rate-limit counters (anti-pumping) ──────────────────────────────────
-
-  async getSendCountIpBlock(ipBlockKey: string): Promise<number> {
-    const raw = await redis.get(otpRateIpBlock(ipBlockKey));
-    return raw !== null ? Number(raw) : 0;
-  }
-
-  async incrementSendCountIpBlock(ipBlockKey: string): Promise<void> {
-    const k = otpRateIpBlock(ipBlockKey);
-    const n = await redis.incr(k);
-    if (n === 1) await redis.expire(k, 3_600);
-  }
-
-  async getSendCountPrefix(prefix: string): Promise<number> {
-    const raw = await redis.get(otpRateNumberPrefix(prefix));
-    return raw !== null ? Number(raw) : 0;
-  }
-
-  async incrementSendCountPrefix(prefix: string): Promise<void> {
-    const k = otpRateNumberPrefix(prefix);
-    const n = await redis.incr(k);
-    if (n === 1) await redis.expire(k, 3_600);
+  async incrementSendCountPrefix(prefix: string): Promise<number> {
+    return incrWithTtl(otpRateNumberPrefix(prefix), 3_600);
   }
 
   // ── Verify-fail fast counter ─────────────────────────────────────────────
 
   async incrementVerifyFail(mobile: string, windowSeconds: number): Promise<number> {
-    const k = otpVerifyFail(mobile);
-    const n = await redis.incr(k);
-    if (n === 1) await redis.expire(k, windowSeconds);
-    return n;
+    return incrWithTtl(otpVerifyFail(mobile), windowSeconds);
   }
 
   async deleteVerifyFail(mobile: string): Promise<void> {
@@ -160,7 +178,7 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
     await redis.del(sessionsActive(role, entityId));
   }
 
-  async denyMandySessions(jtis: string[], ttlSeconds: number): Promise<void> {
+  async denyManySessions(jtis: string[], ttlSeconds: number): Promise<void> {
     if (jtis.length === 0) return;
     await Promise.all(jtis.map(sid => redis.set(jwtDeny(sid), '1', 'EX', ttlSeconds)));
   }

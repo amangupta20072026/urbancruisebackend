@@ -19,6 +19,13 @@
  *   instead, so logout deleted nothing and the signed-out phone kept
  *   receiving the account's notifications. See resolveRefreshDevice().
  *
+ * ROLE GATE ON REFRESH (fix H2):
+ *   A session whose role has been switched off (ENABLED_ROLES) cannot be
+ *   refreshed — 403 ROLE_NOT_ENABLED. The check runs AFTER the token is
+ *   proven genuine (reuse detection + hash match keep their security
+ *   behaviour) and the session is NOT revoked: switching the role back on
+ *   lets it continue within JWT_REFRESH_TTL.
+ *
  * DESIGN CHANGE (DIP fix):
  *   Accepts AuthServiceDeps instead of importing the concrete redis /
  *   repo singletons. All infrastructure access goes through:
@@ -35,6 +42,7 @@ import { hashForStorage } from '../../../shared/auth/tokens.js';
 import { AuthError, ForbiddenError } from '../../../shared/errors/index.js';
 import { ttlToSeconds, expiryFromTtl } from '../../../shared/utils/duration.js';
 import { AUTH_ERROR } from '../types.js';
+import { assertRoleEnabled } from '../../../shared/rbac/enabled-roles.js';
 import type {
   AuthSessionRow,
   RefreshResponseDto,
@@ -119,6 +127,9 @@ export async function refreshSession(
   ) {
     throw new AuthError('Refresh token invalid.', AUTH_ERROR.REFRESH_INVALID);
   }
+
+  // Role gate (fix H2) — the session's role must still be enabled.
+  assertRoleEnabled(deps.enabledRoles, row.role);
 
   // Re-validate the account on every refresh. The web app shares this DB, so
   // a staff member marked 'left', a vendor deactivated, or a deleted row must

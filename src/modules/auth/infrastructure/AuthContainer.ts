@@ -10,6 +10,8 @@
  *   ICaptchaVerifier  →  HCaptchaVerifier when HCAPTCHA_SECRET is set,
  *                        otherwise DisabledCaptchaVerifier (gate off)
  *
+ * Plus the enabled-roles set (fix H2) — ENABLED_ROLE_SET by default.
+ *
  * Then assembles the AuthServiceDeps bundle that every service function
  * receives instead of importing concrete singletons directly.
  *
@@ -29,6 +31,8 @@ import { RedisOtpSessionStore } from './RedisOtpSessionStore.js';
 import { SqlAuditSink } from './SqlAuditSink.js';
 import { HCaptchaVerifier, DisabledCaptchaVerifier } from './HCaptchaVerifier.js';
 import { ENV } from '../../../config/env.js';
+import { ENABLED_ROLE_SET } from '../../../shared/rbac/enabled-roles.js';
+import type { UserRole } from '../../../shared/rbac/roles.js';
 import type { IAuthRepository } from '../ports/IAuthRepository.js';
 import type { IOtpSessionStore } from '../ports/IOtpSessionStore.js';
 import type { IAuditSink } from '../ports/IAuditSink.js';
@@ -43,6 +47,8 @@ export type AuthServiceDeps = {
   readonly store: IOtpSessionStore;
   readonly audit: IAuditSink;
   readonly captcha: ICaptchaVerifier;
+  /** Roles allowed to request OTPs, log in and refresh (fix H2). */
+  readonly enabledRoles: ReadonlySet<UserRole>;
 };
 
 /**
@@ -54,6 +60,7 @@ export function buildAuthDeps(overrides: {
   store?: IOtpSessionStore;
   audit?: IAuditSink;
   captcha?: ICaptchaVerifier;
+  enabledRoles?: ReadonlySet<UserRole>;
 }): AuthServiceDeps {
   const repo = overrides.repo ?? new MysqlAuthRepository();
   const store = overrides.store ?? new RedisOtpSessionStore();
@@ -63,7 +70,8 @@ export function buildAuthDeps(overrides: {
     (ENV.HCAPTCHA_SECRET
       ? new HCaptchaVerifier(ENV.HCAPTCHA_SECRET, ENV.HCAPTCHA_SITEKEY ?? null)
       : new DisabledCaptchaVerifier());
-  return Object.freeze({ repo, store, audit, captcha });
+  const enabledRoles = overrides.enabledRoles ?? ENABLED_ROLE_SET;
+  return Object.freeze({ repo, store, audit, captcha, enabledRoles });
 }
 
 /**

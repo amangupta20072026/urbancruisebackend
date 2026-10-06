@@ -5,6 +5,8 @@
  * Orchestrates POST /auth/otp/verify.
  *
  * ORDER OF CHECKS (keep this order):
+ *   0. Role enabled on this environment? (fix H2) — an OTP sent while the
+ *      role was enabled cannot be redeemed after it is switched off.
  *   1. Mobile blocked / locked?
  *   2. Load OTP session by requestId; it must belong to this mobile + role.
  *   2b. ATOMICALLY count this attempt against the OTP (INCR) BEFORE
@@ -47,6 +49,7 @@ import type { AuthServiceDeps } from '../infrastructure/AuthContainer.js';
 import { audit } from './audit.js';
 import { hashOtp } from './otp-hash.js';
 import { mintAuthenticatedSession } from './mint-session.js';
+import { assertRoleEnabled } from '../../../shared/rbac/enabled-roles.js';
 
 export type VerifyOtpParams = {
   phone: string;
@@ -63,6 +66,9 @@ export async function verifyOtp(
   deps: AuthServiceDeps,
   p: VerifyOtpParams,
 ): Promise<VerifyOtpResponseDto> {
+  // 0. Role gate (fix H2).
+  assertRoleEnabled(deps.enabledRoles, p.role);
+
   const { store, repo } = deps;
   const mobile = normalizeMobile(p.phone, p.countryCode);
 

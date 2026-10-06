@@ -5,6 +5,11 @@
  * Orchestrates POST /auth/otp/request.
  *
  * ORDER OF CHECKS (matters — keep this order):
+ *   0. Role enabled on this environment? (fix H2) — FIRST, so a disabled
+ *                                       role costs nothing: no Redis quota,
+ *                                       no DB lookup, no SMS, and no replay
+ *                                       of a snapshot taken while the role
+ *                                       was still enabled.
  *   1. Idempotency snapshot lookup    — cheap; fingerprinted by
  *                                       sha256(mobile|role) so a reused key
  *                                       with a different payload returns 409
@@ -80,6 +85,7 @@ import { reserveSendQuota, refundSendQuota } from './rate-limits.js';
 import { hashOtp } from './otp-hash.js';
 import { logDispatchFailure, throwDispatchError } from './dispatch-outcome.js';
 import { audit } from './audit.js';
+import { assertRoleEnabled } from '../../../shared/rbac/enabled-roles.js';
 
 /* ==============================================================================
  * Public entry
@@ -106,6 +112,9 @@ export async function sendOtp(
   deps: AuthServiceDeps,
   p: SendOtpParams,
 ): Promise<RequestOtpResponseDto> {
+  // 0. Role gate (fix H2) — before anything else is touched.
+  assertRoleEnabled(deps.enabledRoles, p.role);
+
   const { store, repo } = deps;
   const mobile = normalizeMobile(p.phone, p.countryCode);
   const isTest = TEST_MOBILES.has(mobile);

@@ -119,12 +119,19 @@ const schema = z.object({
   HCAPTCHA_SITEKEY: z.string().min(1).optional(),
 
   // ── Role gate ──────────────────────────────────────────────────────────────────────────
-  // Comma-separated list of UserRole values allowed through the authenticate
-  // middleware. Any valid JWT whose role is NOT in this list is rejected with
-  // 403 ROLE_NOT_ENABLED.
+  // Comma-separated list of user roles allowed to use the app on this
+  // environment. Enforced at EVERY door — OTP request, OTP verify, customer
+  // onboarding, token refresh and the authenticate middleware (fix H2; see
+  // shared/rbac/enabled-roles.ts). A disabled role gets 403 ROLE_NOT_ENABLED
+  // and no SMS, no session.
   //
   // Default: 'customer' only (MVP). When a new role's features ship, add it
   // here in the deployment config — no code change needed.
+  //
+  // Each value MUST be one of: customer, vendor, driver, uc (fix H2). A typo
+  // used to be accepted silently — `ENABLED_ROLES=cutomer` switched EVERY
+  // role off. An unknown value or an empty list now stops the boot with a
+  // clear message.
   //
   // Example .env entries:
   //   ENABLED_ROLES=customer
@@ -138,6 +145,16 @@ const schema = z.object({
         .split(',')
         .map(r => r.trim())
         .filter(Boolean),
+    )
+    .pipe(
+      z
+        .array(
+          z.enum(['customer', 'vendor', 'driver', 'uc'], {
+            error: issue =>
+              `unknown role "${String(issue.input)}" — allowed: customer, vendor, driver, uc`,
+          }),
+        )
+        .min(1, 'must list at least one role (e.g. ENABLED_ROLES=customer)'),
     ),
 });
 

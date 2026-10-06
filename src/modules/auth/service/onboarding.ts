@@ -5,6 +5,9 @@
  * Orchestrates POST /auth/customer/onboard — the ONLY place a customer row is
  * created from the mobile app.
  *
+ *   0. Customer role enabled on this environment? (fix H2) — checked BEFORE
+ *      the ticket is consumed, so switching the role back on lets the same
+ *      ticket be used within its lifetime.
  *   1. Consume the onboarding ticket (atomic read+delete → single use).
  *      Missing / expired / already used → 401 ONBOARDING_EXPIRED.
  *   2. The ticket must come from the same device that verified the OTP.
@@ -25,6 +28,7 @@ import { AUTH_ERROR } from '../types.js';
 import type { AuthenticatedResponseDto, CustomerOnboardingDetails, DeviceMeta } from '../types.js';
 import type { AuthServiceDeps } from '../infrastructure/AuthContainer.js';
 import { mintAuthenticatedSession } from './mint-session.js';
+import { assertRoleEnabled } from '../../../shared/rbac/enabled-roles.js';
 
 export type CompleteOnboardingParams = {
   onboardingToken: string;
@@ -38,6 +42,9 @@ export async function completeCustomerOnboarding(
   deps: AuthServiceDeps,
   p: CompleteOnboardingParams,
 ): Promise<AuthenticatedResponseDto> {
+  // 0. Role gate (fix H2).
+  assertRoleEnabled(deps.enabledRoles, 'customer');
+
   const { store, repo } = deps;
 
   // 1. Single-use ticket

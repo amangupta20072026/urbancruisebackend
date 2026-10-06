@@ -78,6 +78,12 @@ export interface IAuthRepository {
   /** Atomically revoke oldJti and create next. Returns false (and creates
    *  nothing) when oldJti was already revoked by a concurrent refresh. */
   rotateSession(oldJti: string, next: CreateSessionInput): Promise<boolean>;
+  /**
+   * Fix M2: true when oldJti was rotated by a normal refresh within
+   * `graceSeconds` (DB clock) and its replacement session is still active —
+   * i.e. a duplicate refresh from the app itself, not token theft.
+   */
+  isWithinRotationGrace(oldJti: string, graceSeconds: number): Promise<boolean>;
 
   // ── push tokens (cleanup on sign-out) ─────────────────────────────────────
 

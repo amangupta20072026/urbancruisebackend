@@ -101,6 +101,40 @@ export async function revokeAllForEntity(
 }
 
 /**
+ * Is `oldJti` a benign duplicate refresh? (fix M2)
+ *
+ * True only when ALL of these hold:
+ *   • the row was revoked by a normal refresh (revoked_reason = 'rotation'),
+ *   • at most `graceSeconds` ago — measured with the DATABASE clock (NOW()),
+ *     so clock drift between app servers cannot widen or shrink the window,
+ *   • a replacement session created from it (previous_jti = oldJti, same
+ *     account) is still active — so a token whose replacement was logged
+ *     out or force-revoked never gets a new session.
+ *
+ * The join is scoped by (role, entity_id), which uses idx_auth_sessions_entity.
+ */
+export async function isWithinRotationGrace(
+  oldJti: string,
+  graceSeconds: number,
+): Promise<boolean> {
+  const [rows] = await pool.execute<RowDataPacket[]>(
+    `SELECT 1
+       FROM auth_sessions o
+       JOIN auth_sessions s
+         ON s.role = o.role
+        AND s.entity_id = o.entity_id
+        AND s.previous_jti = o.jti
+      WHERE o.jti = ?
+        AND o.revoked_reason = 'rotation'
+        AND o.revoked_at >= NOW() - INTERVAL ? SECOND
+        AND s.revoked_at IS NULL
+      LIMIT 1`,
+    [oldJti, graceSeconds],
+  );
+  return rows.length > 0;
+}
+
+/**
  * Rotation is one transaction:
  *   1. mark oldJti revoked (rotation)
  *   2. insert new session with previous_jti = oldJti

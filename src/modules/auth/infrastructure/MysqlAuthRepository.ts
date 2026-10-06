@@ -50,6 +50,7 @@ import {
   markSessionRevoked,
   revokeAllForEntity,
   rotateSession,
+  isWithinRotationGrace,
 } from '../repository/sessions.js';
 
 import { insertOtpEvent, insertLoginEvent, applyDlr } from '../repository/audit.js';
@@ -128,6 +129,10 @@ export class MysqlAuthRepository implements IAuthRepository {
 
   rotateSession(oldJti: string, next: CreateSessionInput): Promise<boolean> {
     return rotateSession(oldJti, next);
+  }
+
+  isWithinRotationGrace(oldJti: string, graceSeconds: number): Promise<boolean> {
+    return isWithinRotationGrace(oldJti, graceSeconds);
   }
 
   // ── push tokens ──────────────────────────────────────────────────────────

@@ -26,6 +26,17 @@
  *   behaviour) and the session is NOT revoked: switching the role back on
  *   lets it continue within JWT_REFRESH_TTL.
  *
+ * DUPLICATE REFRESH GRACE (fix M2):
+ *   When the app fires two refreshes with the same token (two API calls hit
+ *   401 together), the second one used to look like token theft and revoke
+ *   EVERY session on EVERY device. Now a token rotated by a normal refresh
+ *   within REFRESH_REUSE_GRACE_SECONDS, whose replacement is still active,
+ *   gets a fresh SIBLING session (previous_jti = the same old jti) after the
+ *   same hash / role / account / phone checks as a normal refresh. The same
+ *   applies to the loser of a truly simultaneous race in rotateSession.
+ *   Outside the window — or once the replacement was logged out/revoked —
+ *   reuse detection still revokes everything. See isWithinRotationGrace().
+ *
  * DESIGN CHANGE (DIP fix):
  *   Accepts AuthServiceDeps instead of importing the concrete redis /
  *   repo singletons. All infrastructure access goes through:
@@ -42,6 +53,7 @@ import { hashForStorage } from '../../../shared/auth/tokens.js';
 import { AuthError, ForbiddenError } from '../../../shared/errors/index.js';
 import { ttlToSeconds, expiryFromTtl } from '../../../shared/utils/duration.js';
 import { AUTH_ERROR } from '../types.js';
+import { REFRESH_REUSE_GRACE_SECONDS } from '../../../config/constants.js';
 import { assertRoleEnabled } from '../../../shared/rbac/enabled-roles.js';
 import type {
   AuthSessionRow,
@@ -106,8 +118,18 @@ export async function refreshSession(
     throw new AuthError('Session not found.', AUTH_ERROR.SESSION_REVOKED);
   }
 
-  // Reuse detection — revoked jti presented → nuclear: revoke all for entity.
-  if (row.revoked_at !== null) {
+  // 'rotate' = normal refresh. 'grace' = duplicate of a refresh that just
+  // happened (fix M2): a sibling session is created instead of a rotation.
+  let mode: 'rotate' | 'grace' = 'rotate';
+
+  // Reuse detection — revoked jti presented → nuclear: revoke all for entity,
+  // UNLESS it is the app's own duplicate inside the grace window (fix M2).
+  if (
+    row.revoked_at !== null &&
+    (await repo.isWithinRotationGrace(claims.jti, REFRESH_REUSE_GRACE_SECONDS))
+  ) {
+    mode = 'grace';
+  } else if (row.revoked_at !== null) {
     const revokedJtis = await repo.revokeAllForEntity(row.role, row.entity_id, 'reuse_detected');
     await Promise.all([
       store.denyManySessions(revokedJtis, ttlToSeconds(ENV.JWT_ACCESS_TTL)),
@@ -191,7 +213,7 @@ export async function refreshSession(
   const newHash = hashForStorage(newRefresh);
   const expiresAt = expiryFromTtl(ENV.JWT_REFRESH_TTL);
 
-  const rotated = await repo.rotateSession(claims.jti, {
+  const next = {
     jti: newJti,
     role: row.role,
     entityId: row.entity_id,
@@ -202,11 +224,26 @@ export async function refreshSession(
     ip,
     userAgent,
     expiresAt,
-  });
-  if (!rotated) {
-    // A concurrent refresh with the same token won the race. Nothing was
-    // created for this request; the client must use the winner's tokens.
-    throw new AuthError('Refresh already in progress.', AUTH_ERROR.REFRESH_INVALID);
+  };
+
+  if (mode === 'rotate') {
+    const rotated = await repo.rotateSession(claims.jti, next);
+    if (!rotated) {
+      // A concurrent refresh with the same token won the race a moment ago
+      // (fix M2): within the grace window this request gets a sibling session
+      // too, instead of a 401 that could log the app out.
+      if (!(await repo.isWithinRotationGrace(claims.jti, REFRESH_REUSE_GRACE_SECONDS))) {
+        throw new AuthError('Refresh already in progress.', AUTH_ERROR.REFRESH_INVALID);
+      }
+      mode = 'grace';
+    }
+  }
+  if (mode === 'grace') {
+    await repo.createSession(next);
+    logger.info(
+      { role: row.role, entityId: row.entity_id, oldJti: claims.jti, newJti },
+      'refresh: duplicate within grace window — sibling session issued (not treated as reuse)',
+    );
   }
 
   await Promise.all([

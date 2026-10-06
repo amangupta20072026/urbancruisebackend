@@ -192,6 +192,23 @@ export const MSG91_CB_WINDOW_SECONDS = 300; // 5 min sliding window
 export const MSG91_CB_OPEN_SECONDS = 60;
 
 /* ==============================================================================
+ * Refresh-token reuse grace window (fix M2)
+ * ==============================================================================
+ * A refresh token that was rotated by a normal refresh at most this many
+ * seconds ago — and whose replacement session is still active — is treated
+ * as the app's own duplicate request (two API calls hit 401 together and
+ * both refreshed with the same token), not as theft. The server issues a
+ * fresh token pair instead of revoking every session on every device.
+ *
+ * Outside the window, or if the replacement was logged out / revoked, the
+ * normal reuse detection applies: all sessions are revoked.
+ *
+ * Keep it SHORT: it is also the window in which a stolen-and-replayed token
+ * goes unnoticed. 10 s covers network retries and parallel 401 handlers.
+ * ============================================================================== */
+export const REFRESH_REUSE_GRACE_SECONDS = 10;
+
+/* ==============================================================================
  * Refresh-session cache
  * ============================================================================== */
 

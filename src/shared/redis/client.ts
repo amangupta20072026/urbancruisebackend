@@ -49,8 +49,20 @@ redis.on('close', () => logger.warn('redis connection closed'));
 redis.on('reconnecting', (delay: number) => logger.warn({ delay }, 'redis reconnecting'));
 redis.on('end', () => logger.warn('redis connection ended'));
 
-/** PING — used by /ready to prove Redis is reachable. */
+/**
+ * PING — used by /ready to prove Redis is reachable AND usable.
+ *
+ * Fails fast when the client is not in the 'ready' state (connecting,
+ * reconnecting, closed, …). Without this guard the PING would sit in the
+ * ioredis offline queue and be retried (maxRetriesPerRequest) across
+ * reconnect attempts, so a probe against a dead Redis would hang for
+ * seconds instead of reporting it down. Callers should still apply their
+ * own timeout: a half-open TCP connection can look 'ready' and never reply.
+ */
 export async function pingRedis(): Promise<void> {
+  if (redis.status !== 'ready') {
+    throw new Error(`redis client not ready (status: ${redis.status})`);
+  }
   const r = await redis.ping();
   if (r !== 'PONG') {
     throw new Error(`redis ping returned unexpected value: ${r}`);

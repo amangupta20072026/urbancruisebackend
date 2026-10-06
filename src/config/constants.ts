@@ -32,6 +32,15 @@ export const REQUEST_TIMEOUT_MS = 30_000;
 /** How long the graceful shutdown drain has before we hard-exit. */
 export const SHUTDOWN_TIMEOUT_MS = 15_000;
 
+/**
+ * Per-dependency budget for the /ready probe (MySQL ping, Redis ping).
+ * Checks run in parallel, so the whole probe answers within roughly this
+ * time even when a dependency hangs. Keep it well below the orchestrator /
+ * load-balancer probe timeout so we always answer 503 ourselves rather than
+ * letting the caller time out with no signal.
+ */
+export const READINESS_CHECK_TIMEOUT_MS = 2_000;
+
 /** Header names — centralize spelling so no one typoes 'X-Request-ID' vs 'X-Request-Id'. */
 export const HEADER_REQUEST_ID = 'x-request-id';
 export const HEADER_AUTHORIZATION = 'authorization';

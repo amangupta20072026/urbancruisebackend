@@ -27,7 +27,15 @@ const secretSchema = z
 
 const schema = z.object({
   // ── App ─────────────────────────────────────────────────────────────────
-  NODE_ENV: z.enum(['development', 'production']).default('development'),
+  // REQUIRED — no default (fix N4). It used to default to 'development', so a
+  // production box started without `--env production` silently ran in dev
+  // mode: internal error messages (DB host, users, tables) were returned to
+  // anonymous clients and every production safety check below switched off.
+  // A missing value now stops the boot with a clear message instead.
+  NODE_ENV: z.enum(['development', 'production'], {
+    error: () =>
+      "must be set to 'production' or 'development' (no default — e.g. NODE_ENV=production in .env or the PM2 config)",
+  }),
   PORT: z.coerce.number().int().positive().max(65535).default(3001),
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
 

@@ -50,6 +50,13 @@ module.exports = {
       merge_logs: true,
       log_date_format: 'YYYY-MM-DD HH:mm:ss.SSS Z',
 
+      // Base env — applies to EVERY start, including a plain `pm2 start
+      // ecosystem.config.cjs` or `pm2 restart` without --env. Production is
+      // the safe default on a server (fix N4); use --env development to
+      // override locally.
+      env: {
+        NODE_ENV: 'production',
+      },
       env_production: {
         NODE_ENV: 'production',
       },

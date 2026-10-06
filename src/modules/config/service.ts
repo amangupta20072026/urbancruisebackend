@@ -13,6 +13,15 @@
  * Returns the full DTO plus a strong ETag computed from the JSON body, so
  * the controller can short-circuit unchanged responses with 304.
  *
+ * NO STORE PAGE ⇒ NO FORCED UPDATE (fix B4):
+ *   When the caller's platform has no store link configured (app not yet
+ *   published there — see STORE_LINKS), `updateUrl` is null and
+ *   `updateRequired` / `updateAvailable` are forced to false. A forced
+ *   update without a store page would lock every user of that platform on a
+ *   screen whose only button goes nowhere. If a forced update WOULD have
+ *   applied, an error is logged (`alarm: 'force_update_without_store_link'`)
+ *   so the missing link gets fixed.
+ *
  * DESIGN NOTES:
  *  - Version comparison uses semver.lt. Invalid inputs are already rejected
  *    at the schema layer.
@@ -26,6 +35,7 @@
 import { createHash } from 'node:crypto';
 import { lt as semverLt } from 'semver';
 
+import { logger } from '../../shared/logger/index.js';
 import { getStaticAppConfig, STORE_LINKS } from './data/app-config.js';
 import type { AppConfigContext, AppConfigData } from './types.js';
 
@@ -38,23 +48,30 @@ export type AppConfigResult = {
 export async function getAppConfig(ctx: AppConfigContext): Promise<AppConfigResult> {
   const base = getStaticAppConfig();
 
-  // Version flags — inclusive: equal versions are neither required nor available.
-  const updateRequired = semverLt(ctx.appVersion, base.version.minSupported);
-  const updateAvailable = semverLt(ctx.appVersion, base.version.latest);
+  const updateUrl = STORE_LINKS[ctx.platform];
 
-  const updateUrl =
-    ctx.platform === 'android'
-      ? STORE_LINKS.android
-      : ctx.platform === 'ios'
-        ? STORE_LINKS.ios
-        : null;
+  // Version flags — inclusive: equal versions are neither required nor available.
+  const belowMin = semverLt(ctx.appVersion, base.version.minSupported);
+  const belowLatest = semverLt(ctx.appVersion, base.version.latest);
+
+  if (updateUrl === null && belowMin) {
+    logger.error(
+      {
+        alarm: 'force_update_without_store_link',
+        platform: ctx.platform,
+        appVersion: ctx.appVersion,
+        minSupported: base.version.minSupported,
+      },
+      'forced update suppressed — no store link configured for this platform (set STORE_LINKS in config/data/app-config.ts)',
+    );
+  }
 
   const data: AppConfigData = {
     ...base,
     version: {
       ...base.version,
-      updateRequired,
-      updateAvailable,
+      updateRequired: updateUrl !== null && belowMin,
+      updateAvailable: updateUrl !== null && belowLatest,
       updateUrl,
     },
   };

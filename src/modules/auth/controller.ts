@@ -79,17 +79,13 @@ export async function postCustomerOnboard(req: Request, res: Response): Promise<
 export async function postRefresh(req: Request, res: Response): Promise<Response> {
   const body = req.body as RefreshBody;
 
-  const device = extractDevice(req) ?? {
-    id: 'unknown-device',
-    name: 'Unknown device',
-    platform: 'ios' as const,
-    appVersion: '0.0.0 (0)',
-  };
-
+  // Fix H1: the device comes from the VALIDATED body (RefreshBody now
+  // declares it). When the app omits it, the service copies the device from
+  // the previous session — no fake 'unknown-device' is ever invented here.
   const out = await service.refreshSession(
     authDeps,
     body.refreshToken,
-    device,
+    body.device ?? null,
     clientIp(req),
     req.header('user-agent') ?? null,
   );
@@ -131,23 +127,4 @@ export async function getMe(req: Request, res: Response): Promise<Response> {
 
 function clientIp(req: Request): string | null {
   return req.ip ?? null;
-}
-
-function extractDevice(
-  req: Request,
-): { id: string; name: string; platform: 'ios' | 'android'; appVersion: string } | null {
-  type MaybeDevice = { id?: unknown; name?: unknown; platform?: unknown; appVersion?: unknown };
-  const b = req.body as { device?: MaybeDevice };
-  const d = b?.device;
-  if (!d || typeof d !== 'object') return null;
-  if (
-    typeof d.id !== 'string' ||
-    typeof d.name !== 'string' ||
-    typeof d.platform !== 'string' ||
-    typeof d.appVersion !== 'string'
-  ) {
-    return null;
-  }
-  if (d.platform !== 'ios' && d.platform !== 'android') return null;
-  return { id: d.id, name: d.name, platform: d.platform, appVersion: d.appVersion };
 }

@@ -11,7 +11,7 @@
 import type { RowDataPacket, PoolConnection, ResultSetHeader } from 'mysql2/promise';
 import { pool } from '../../../shared/db/pool.js';
 import { withTransaction } from '../../../shared/db/transaction.js';
-import type { AuthSessionRow, DeviceMeta } from '../types.js';
+import type { AuthSessionRow, SessionDevice } from '../types.js';
 import type { UserRole, SubRole } from '../../../shared/rbac/roles.js';
 
 /** Must match the auth_sessions.revoked_reason ENUM exactly. */
@@ -25,7 +25,8 @@ export type CreateSessionInput = {
   subRole: SubRole;
   refreshTokenHash: string;
   previousJti: string | null;
-  device: DeviceMeta;
+  /** Nullable per column — see SessionDevice. Login always passes a full DeviceMeta. */
+  device: SessionDevice;
   ip: string | null;
   userAgent: string | null;
   expiresAt: Date;

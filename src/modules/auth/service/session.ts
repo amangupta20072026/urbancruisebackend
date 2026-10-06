@@ -11,6 +11,14 @@
  * push tokens are deleted too, so a signed-out phone stops receiving that
  * account's notifications. Cleanup is best-effort and never blocks sign-out.
  *
+ * DEVICE ON REFRESH (fix H1):
+ *   The rotated session must keep pointing at the REAL phone, because
+ *   logout deletes push tokens by the session's device_id. The device sent
+ *   by the app is used when present; otherwise it is copied from the
+ *   previous session row. The old code stored a fake 'unknown-device'
+ *   instead, so logout deleted nothing and the signed-out phone kept
+ *   receiving the account's notifications. See resolveRefreshDevice().
+ *
  * DESIGN CHANGE (DIP fix):
  *   Accepts AuthServiceDeps instead of importing the concrete redis /
  *   repo singletons. All infrastructure access goes through:
@@ -27,7 +35,13 @@ import { hashForStorage } from '../../../shared/auth/tokens.js';
 import { AuthError, ForbiddenError } from '../../../shared/errors/index.js';
 import { ttlToSeconds, expiryFromTtl } from '../../../shared/utils/duration.js';
 import { AUTH_ERROR } from '../types.js';
-import type { AuthSessionRow, RefreshResponseDto, MeResponseDto, DeviceMeta } from '../types.js';
+import type {
+  AuthSessionRow,
+  RefreshResponseDto,
+  MeResponseDto,
+  DeviceMeta,
+  SessionDevice,
+} from '../types.js';
 import type { UserRole, SubRole } from '../../../shared/rbac/roles.js';
 import type { AuthServiceDeps } from '../infrastructure/AuthContainer.js';
 import type { RevokeReason } from '../ports/IAuthRepository.js';
@@ -36,10 +50,43 @@ import type { RevokeReason } from '../ports/IAuthRepository.js';
  * REFRESH
  * ============================================================================== */
 
+/**
+ * The placeholder the pre-H1 controller wrote on every refreshed session.
+ * Rows that still carry it are treated as "device unknown" (null) so the
+ * fake value stops propagating; the next refresh that sends a device heals
+ * the chain.
+ */
+export const LEGACY_PLACEHOLDER_DEVICE_ID = 'unknown-device';
+
+/**
+ * Which device the rotated session should record (fix H1).
+ *   1. The device the app sent with this refresh — current and authoritative
+ *      (it also picks up a newer appVersion after an app update).
+ *   2. Otherwise the previous session's device, copied as-is.
+ *   3. A previous device that is the legacy placeholder becomes all-null.
+ * Never invents a device.
+ */
+export function resolveRefreshDevice(
+  sent: DeviceMeta | null,
+  previous: Pick<AuthSessionRow, 'device_id' | 'device_name' | 'platform' | 'app_version'>,
+): SessionDevice {
+  if (sent) return sent;
+  if (previous.device_id === null || previous.device_id === LEGACY_PLACEHOLDER_DEVICE_ID) {
+    return { id: null, name: null, platform: null, appVersion: null };
+  }
+  return {
+    id: previous.device_id,
+    name: previous.device_name,
+    platform: previous.platform,
+    appVersion: previous.app_version,
+  };
+}
+
 export async function refreshSession(
   deps: AuthServiceDeps,
   refreshTokenStr: string,
-  device: DeviceMeta,
+  /** Device sent with this refresh; null when the app did not send one. */
+  sentDevice: DeviceMeta | null,
   ip: string | null,
   userAgent: string | null,
 ): Promise<RefreshResponseDto> {
@@ -140,7 +187,7 @@ export async function refreshSession(
     subRole,
     refreshTokenHash: newHash,
     previousJti: claims.jti,
-    device,
+    device: resolveRefreshDevice(sentDevice, row),
     ip,
     userAgent,
     expiresAt,

@@ -16,11 +16,20 @@ export type AppConfigVersion = {
   minSupported: string;
   /** Latest released version. Above the client's current, show soft banner. */
   latest: string;
-  /** Computed per-request: is the caller below `minSupported`? */
+  /**
+   * Computed per-request: is the caller below `minSupported`?
+   * Always false when `updateUrl` is null (no store page to send them to).
+   */
   updateRequired: boolean;
-  /** Computed per-request: is the caller below `latest`? */
+  /**
+   * Computed per-request: is the caller below `latest`?
+   * Always false when `updateUrl` is null.
+   */
   updateAvailable: boolean;
-  /** Platform-specific store URL to open. Null when caller platform is 'web'. */
+  /**
+   * Store page for the caller's platform. Null when the app is not yet
+   * published on that store (see STORE_LINKS in data/app-config.ts).
+   */
   updateUrl: string | null;
 };
 
@@ -33,6 +42,10 @@ export type AppConfigMaintenance = {
 };
 
 export type AppConfigFeatureFlags = {
+  /**
+   * Always false. Per-number test mode is reported by POST /auth/otp/request
+   * (`testMode`). Kept so shipped clients that read it still parse.
+   */
   otpTestMode: boolean;
   referralsEnabled: boolean;
   supportChatEnabled: boolean;

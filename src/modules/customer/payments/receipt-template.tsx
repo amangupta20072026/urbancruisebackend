@@ -2,27 +2,41 @@
  * ==============================================================================
  * Receipt PDF Template — @react-pdf/renderer
  * ==============================================================================
- * Design matches the shared mockup exactly:
- *   • UC logo (ucwithtexthindi.png) top-left
+ * Layout:
+ *   • UC logo (ucwithhinditext.png) top-left
  *   • "Payment Receipt" + receipt number top-right
  *   • Generated date + "computer generated" sub-text
- *   • Green hero banner: checkmark + "Payment Successful"
+ *   • Green hero banner: drawn check mark + "Payment Successful"
  *   • Amount card: ₹ amount | Payment Status pill
  *   • Payment Details table: Method / ID / TxnID / Paid On / Vehicle / Date
- *   • Security banner (lock icon)
- *   • Thank you footer + QR verification code
+ *   • Security banner (drawn lock icon)
+ *   • Thank you footer
  *   • Dark footer bar: company name left, website right
  *
- * SRP FIX:
- *   formatRupees / rupeesToWords / fmtDateTime extracted to
- *   shared/utils/currency.ts — they are generic INR utilities, not
- *   template-specific logic. The template is now purely presentational.
+ * FONT (fix B3):
+ *   The built-in PDF font Helvetica has no ₹ glyph, so amounts printed as
+ *   "12,345" with no currency. The receipt now embeds Noto Sans (SIL Open
+ *   Font License — see src/assets/fonts/OFL.txt), which contains ₹ and every
+ *   other character this template prints. It is registered lazily on the
+ *   first render. If the font files are missing, the receipt falls back to
+ *   Helvetica and prints the amount as "Rs. 12,345" — never a bare number.
  *
- * DIP FIX:
- *   Image loading (fs.readFileSync) is now LAZY — called inside renderReceipt()
- *   rather than at module load time. Importing this file no longer touches the
- *   filesystem, which makes it safe to import in tests and avoids a hard crash
- *   when the assets folder is absent during CI or cold container starts.
+ * ICONS (fix B3):
+ *   ✓ and 🔒 are not in Helvetica OR Noto Sans (the check-mark circle came
+ *   out blank and the lock printed as "="). Both are now drawn as vector
+ *   shapes with <Svg>, so they never depend on a font.
+ *
+ * NO QR CODE (fix B3):
+ *   The old footer showed an empty box captioned "Scan to verify this
+ *   receipt", but no QR code or verification service exists. That promise is
+ *   removed. Add it back only together with a real verification endpoint.
+ *
+ * SRP: formatRupees / rupeesToWords / fmtDateTime live in
+ *   shared/utils/currency.ts — this file is purely presentational.
+ *
+ * LAZY I/O: nothing touches the filesystem at import time. Images and fonts
+ *   are located inside renderReceipt(), so importing this module is safe in
+ *   tests and when the assets folder is absent.
  * ==============================================================================
  */
 
@@ -30,7 +44,18 @@ import React from 'react';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Document, Page, Text, View, Image, StyleSheet, Font } from '@react-pdf/renderer';
+import {
+  Document,
+  Page,
+  Text,
+  View,
+  Image,
+  StyleSheet,
+  Font,
+  Svg,
+  Path,
+  Rect,
+} from '@react-pdf/renderer';
 import { formatRupees, rupeesToWords, fmtDateTime } from '../../../shared/utils/currency.js';
 import { logger } from '../../../shared/logger/index.js';
 
@@ -39,35 +64,48 @@ import { logger } from '../../../shared/logger/index.js';
 //   1. Next to the compiled code — src/assets when running from source (tsx),
 //      dist/assets in production (`npm run build` copies src/assets there).
 //   2. <cwd>/src/assets — fallback for deployments that ship the source tree.
-// The old code ONLY used <cwd>/src/assets, so a deploy that ships just dist/
-// (or a PM2 config with a different cwd) silently lost the logo.
 const ASSET_DIRS = [
   fileURLToPath(new URL('../../../assets/', import.meta.url)),
   path.join(process.cwd(), 'src', 'assets'),
 ];
 
-/** The logo file actually present in src/assets (the old name had a typo). */
+/** The logo file actually present in src/assets. */
 export const RECEIPT_LOGO_FILE = 'ucwithhinditext.png';
+
+/** Font files (inside the assets folder) — must contain the ₹ glyph. */
+const FONT_FILES = {
+  regular: path.join('fonts', 'NotoSans-Regular.ttf'),
+  bold: path.join('fonts', 'NotoSans-Bold.ttf'),
+} as const;
+
+/** Family name the receipt uses when Noto Sans is available. */
+export const RECEIPT_FONT_FAMILY = 'NotoSans';
+/** Built-in fallback family (no ₹ glyph — amounts use "Rs." instead). */
+const FALLBACK_FONT_FAMILY = 'Helvetica';
+
+/** Returns the first existing path for `relative` across ASSET_DIRS, or null. */
+function findAsset(relative: string): string | null {
+  for (const dir of ASSET_DIRS) {
+    const full = path.join(dir, relative);
+    if (fs.existsSync(full)) return full;
+  }
+  return null;
+}
 
 let missingLogoWarned = false;
 
 /**
  * Load an asset image as a base64 data URI.
- * Called LAZILY inside renderReceipt() — not at module load time.
  * Returns '' when the file is missing, so the receipt falls back to a text
- * header instead of crashing — but now says so ONCE in the logs, rather
- * than silently shipping logo-less receipts forever.
+ * header instead of crashing — and says so ONCE in the logs.
  */
 function loadImage(filename: string): string {
-  for (const dir of ASSET_DIRS) {
-    try {
-      const buf = fs.readFileSync(path.join(dir, filename));
-      const ext = path.extname(filename).slice(1).toLowerCase();
-      const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
-      return `data:${mime};base64,${buf.toString('base64')}`;
-    } catch {
-      // try the next directory
-    }
+  const full = findAsset(filename);
+  if (full) {
+    const buf = fs.readFileSync(full);
+    const ext = path.extname(filename).slice(1).toLowerCase();
+    const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
+    return `data:${mime};base64,${buf.toString('base64')}`;
   }
   if (!missingLogoWarned) {
     missingLogoWarned = true;
@@ -79,6 +117,37 @@ function loadImage(filename: string): string {
   return '';
 }
 
+/**
+ * Register Noto Sans once (lazily). Returns true when the font is available.
+ * The result is cached; a missing font is logged ONCE.
+ */
+let fontState: 'unknown' | 'ready' | 'missing' = 'unknown';
+
+function ensureReceiptFont(): boolean {
+  if (fontState !== 'unknown') return fontState === 'ready';
+
+  const regular = findAsset(FONT_FILES.regular);
+  const bold = findAsset(FONT_FILES.bold);
+  if (!regular || !bold) {
+    fontState = 'missing';
+    logger.warn(
+      { files: FONT_FILES, searched: ASSET_DIRS },
+      'receipt font not found — falling back to Helvetica (amounts print as "Rs."). Did the build copy src/assets?',
+    );
+    return false;
+  }
+
+  Font.register({
+    family: RECEIPT_FONT_FAMILY,
+    fonts: [
+      { src: regular, fontWeight: 'normal' },
+      { src: bold, fontWeight: 'bold' },
+    ],
+  });
+  fontState = 'ready';
+  return true;
+}
+
 /** Shown wherever the payment record has no value — never an invented one. */
 export const NOT_RECORDED = 'Not recorded';
 
@@ -86,6 +155,14 @@ export const NOT_RECORDED = 'Not recorded';
 function fmtMaybeDateTime(iso: string | null): string {
   if (!iso || Number.isNaN(Date.parse(iso))) return NOT_RECORDED;
   return fmtDateTime(iso);
+}
+
+/**
+ * Amount text. "₹12,345" with Noto Sans; "Rs. 12,345" with the Helvetica
+ * fallback, which has no ₹ glyph (the old bug: a bare "12,345").
+ */
+export function formatReceiptAmount(n: number, hasRupeeGlyph: boolean): string {
+  return hasRupeeGlyph ? formatRupees(n) : `Rs. ${n.toLocaleString('en-IN')}`;
 }
 
 /* ── Colours ── */
@@ -97,7 +174,6 @@ const C = {
   pillGreen: '#E8F5EE',
   pillText: '#2E7D52',
   white: '#FFFFFF',
-  offWhite: '#F8FAFB',
   textDark: '#1A1A2E',
   textMid: '#444',
   textLight: '#6B7280',
@@ -108,10 +184,14 @@ const C = {
 
 Font.registerHyphenationCallback(word => [word]);
 
+/*
+ * Styles. The font FAMILY is set once on <Page> (Noto Sans or Helvetica) and
+ * inherited by every <Text>; bold text uses fontWeight: 'bold', which maps to
+ * NotoSans-Bold or Helvetica-Bold automatically.
+ */
 const s = StyleSheet.create({
   page: {
     backgroundColor: C.white,
-    fontFamily: 'Helvetica',
     paddingVertical: 0,
     paddingHorizontal: 0,
     fontSize: 10,
@@ -125,9 +205,10 @@ const s = StyleSheet.create({
     paddingBottom: 20,
   },
   logo: { width: 140, height: 52, objectFit: 'contain' },
+  logoText: { fontSize: 18, fontWeight: 'bold', color: C.primary },
   headerRight: { alignItems: 'flex-end' },
-  headerTitle: { fontSize: 18, fontFamily: 'Helvetica-Bold', color: C.textDark },
-  headerRcptNo: { fontSize: 10, color: C.primary, fontFamily: 'Helvetica-Bold', marginTop: 3 },
+  headerTitle: { fontSize: 18, fontWeight: 'bold', color: C.textDark },
+  headerRcptNo: { fontSize: 10, color: C.primary, fontWeight: 'bold', marginTop: 3 },
   headerDate: { fontSize: 8, color: C.textLight, marginTop: 3, textAlign: 'right' },
   headerComputer: { fontSize: 8, color: C.textLight, textAlign: 'right' },
   dividerLine: { height: 1, backgroundColor: C.border, marginHorizontal: 36, marginBottom: 20 },
@@ -149,9 +230,8 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  heroCheck: { fontSize: 24, color: C.white, fontFamily: 'Helvetica-Bold' },
   heroRight: { flex: 1 },
-  heroTitle: { fontSize: 18, fontFamily: 'Helvetica-Bold', color: C.primaryLight, marginBottom: 4 },
+  heroTitle: { fontSize: 18, fontWeight: 'bold', color: C.primaryLight, marginBottom: 4 },
   heroSub: { fontSize: 9.5, color: C.textMid, marginBottom: 1 },
   amountCard: {
     flexDirection: 'row',
@@ -164,9 +244,9 @@ const s = StyleSheet.create({
     padding: 18,
     marginBottom: 20,
   },
-  amountLeft: {},
+  amountLeft: { flex: 1 },
   amtLabel: { fontSize: 9, color: C.textLight, marginBottom: 5 },
-  amtValue: { fontSize: 30, fontFamily: 'Helvetica-Bold', color: C.primary, marginBottom: 3 },
+  amtValue: { fontSize: 30, fontWeight: 'bold', color: C.primary, marginBottom: 3 },
   amtWords: { fontSize: 8, color: C.textLight },
   amountDivider: { width: 1, height: 60, backgroundColor: C.border, marginHorizontal: 16 },
   amountRight: { alignItems: 'flex-end' },
@@ -177,9 +257,9 @@ const s = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 5,
   },
-  statusPillText: { fontSize: 11, fontFamily: 'Helvetica-Bold', color: C.pillText },
+  statusPillText: { fontSize: 11, fontWeight: 'bold', color: C.pillText },
   section: { marginHorizontal: 36, marginBottom: 20 },
-  sectionTitle: { fontSize: 13, fontFamily: 'Helvetica-Bold', color: C.textDark, marginBottom: 10 },
+  sectionTitle: { fontSize: 13, fontWeight: 'bold', color: C.textDark, marginBottom: 10 },
   tableRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -198,14 +278,14 @@ const s = StyleSheet.create({
   tableValue: {
     fontSize: 9.5,
     color: C.textDark,
-    fontFamily: 'Helvetica-Bold',
+    fontWeight: 'bold',
     textAlign: 'right',
     maxWidth: '60%',
   },
   tableValueGreen: {
     fontSize: 9.5,
     color: C.primary,
-    fontFamily: 'Helvetica-Bold',
+    fontWeight: 'bold',
     textAlign: 'right',
     maxWidth: '60%',
   },
@@ -227,31 +307,15 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  lockIcon: { fontSize: 15, color: C.white },
   securityText: { flex: 1 },
-  securityBold: { fontSize: 8.5, fontFamily: 'Helvetica-Bold', color: C.textDark, marginBottom: 2 },
+  securityBold: { fontSize: 8.5, fontWeight: 'bold', color: C.textDark, marginBottom: 2 },
   securitySub: { fontSize: 8, color: C.textLight },
   thankYouArea: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-end',
     marginHorizontal: 36,
     marginBottom: 24,
   },
-  thankYouLeft: {},
-  thankYouTitle: { fontSize: 13, fontFamily: 'Helvetica-Bold', color: C.primary, marginBottom: 3 },
+  thankYouTitle: { fontSize: 13, fontWeight: 'bold', color: C.primary, marginBottom: 3 },
   thankYouSub: { fontSize: 8.5, color: C.textLight },
-  qrArea: { alignItems: 'center' },
-  qrPlaceholder: {
-    width: 64,
-    height: 64,
-    backgroundColor: C.offWhite,
-    borderWidth: 1,
-    borderColor: C.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  qrText: { fontSize: 6, color: C.textLight, marginTop: 4, textAlign: 'center' },
   footerBar: {
     backgroundColor: C.footerBg,
     flexDirection: 'row',
@@ -260,11 +324,41 @@ const s = StyleSheet.create({
     paddingHorizontal: 36,
     paddingVertical: 14,
   },
-  footerLeft: {},
-  footerCompany: { fontSize: 9, fontFamily: 'Helvetica-Bold', color: C.white, marginBottom: 2 },
+  footerCompany: { fontSize: 9, fontWeight: 'bold', color: C.white, marginBottom: 2 },
   footerTagline: { fontSize: 7.5, color: '#9CA3AF' },
   footerWebsite: { fontSize: 9, color: '#9CA3AF' },
 });
+
+/* ── Drawn icons (no font needed) ── */
+
+/** White check mark, drawn as a stroked path. */
+const CheckIcon: React.FC = () => (
+  <Svg width={26} height={26} viewBox="0 0 24 24">
+    <Path
+      d="M5 12.5 L10 17.5 L19 7"
+      stroke={C.white}
+      strokeWidth={3}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      fill="none"
+    />
+  </Svg>
+);
+
+/** White padlock: a shackle arc over a solid body with a keyhole. */
+const LockIcon: React.FC = () => (
+  <Svg width={16} height={16} viewBox="0 0 24 24">
+    <Path
+      d="M7 11 V7.5 A5 5 0 0 1 17 7.5 V11"
+      stroke={C.white}
+      strokeWidth={2.4}
+      strokeLinecap="round"
+      fill="none"
+    />
+    <Rect x={4} y={11} width={16} height={11} rx={2} ry={2} fill={C.white} />
+    <Rect x={11} y={14.5} width={2} height={4} rx={1} ry={1} fill={C.primaryLight} />
+  </Svg>
+);
 
 /* ── ReceiptData ── */
 
@@ -286,10 +380,14 @@ export type ReceiptData = {
 
 /* ── Document component ── */
 
-export const ReceiptDocument: React.FC<{ data: ReceiptData; logoUri: string }> = ({
-  data,
-  logoUri,
-}) => (
+export const ReceiptDocument: React.FC<{
+  data: ReceiptData;
+  logoUri: string;
+  /** Font family set on <Page>; inherited by all text. */
+  fontFamily: string;
+  /** True when the font has a ₹ glyph (Noto Sans); false for Helvetica. */
+  hasRupeeGlyph: boolean;
+}> = ({ data, logoUri, fontFamily, hasRupeeGlyph }) => (
   <Document
     title={`Urban Cruise Receipt – ${data.receiptNumber}`}
     author="Urban Cruise"
@@ -297,16 +395,14 @@ export const ReceiptDocument: React.FC<{ data: ReceiptData; logoUri: string }> =
     creator="Urban Cruise Backend"
     producer="@react-pdf/renderer"
   >
-    <Page size="A4" style={s.page}>
+    <Page size="A4" style={[s.page, { fontFamily }]}>
       {/* ── Header: logo left, receipt info right ── */}
       <View style={s.headerArea}>
         <View>
           {logoUri ? (
             <Image style={s.logo} src={logoUri} />
           ) : (
-            <Text style={{ fontSize: 18, fontFamily: 'Helvetica-Bold', color: C.primary }}>
-              Urban Cruise
-            </Text>
+            <Text style={s.logoText}>Urban Cruise</Text>
           )}
         </View>
         <View style={s.headerRight}>
@@ -319,10 +415,10 @@ export const ReceiptDocument: React.FC<{ data: ReceiptData; logoUri: string }> =
 
       <View style={s.dividerLine} />
 
-      {/* ── Hero: green check + Payment Successful ── */}
+      {/* ── Hero: drawn check mark + Payment Successful ── */}
       <View style={s.heroBanner}>
         <View style={s.heroCircle}>
-          <Text style={s.heroCheck}>✓</Text>
+          <CheckIcon />
         </View>
         <View style={s.heroRight}>
           <Text style={s.heroTitle}>Payment Successful</Text>
@@ -335,7 +431,7 @@ export const ReceiptDocument: React.FC<{ data: ReceiptData; logoUri: string }> =
       <View style={s.amountCard}>
         <View style={s.amountLeft}>
           <Text style={s.amtLabel}>Amount Paid</Text>
-          <Text style={s.amtValue}>{formatRupees(data.amount)}</Text>
+          <Text style={s.amtValue}>{formatReceiptAmount(data.amount, hasRupeeGlyph)}</Text>
           <Text style={s.amtWords}>{rupeesToWords(data.amount)}</Text>
         </View>
         <View style={s.amountDivider} />
@@ -379,7 +475,7 @@ export const ReceiptDocument: React.FC<{ data: ReceiptData; logoUri: string }> =
       {/* ── Security banner ── */}
       <View style={s.securityBanner}>
         <View style={s.lockCircle}>
-          <Text style={s.lockIcon}>🔒</Text>
+          <LockIcon />
         </View>
         <View style={s.securityText}>
           <Text style={s.securityBold}>
@@ -389,24 +485,16 @@ export const ReceiptDocument: React.FC<{ data: ReceiptData; logoUri: string }> =
         </View>
       </View>
 
-      {/* ── Thank you + QR area ── */}
+      {/* ── Thank you ── */}
       <View style={s.thankYouArea}>
-        <View style={s.thankYouLeft}>
-          <Text style={s.thankYouTitle}>Thank you for choosing Urban Cruise!</Text>
-          <Text style={s.thankYouSub}>Safe Journeys. A Better Tomorrow.</Text>
-        </View>
-        <View style={s.qrArea}>
-          <View style={s.qrPlaceholder}>
-            <Text style={{ fontSize: 18, color: C.textLight }}>▦</Text>
-          </View>
-          <Text style={s.qrText}>Scan to verify{'\n'}this receipt</Text>
-        </View>
+        <Text style={s.thankYouTitle}>Thank you for choosing Urban Cruise!</Text>
+        <Text style={s.thankYouSub}>Safe Journeys. A Better Tomorrow.</Text>
       </View>
 
       {/* ── Dark footer bar ── */}
       <View style={s.footerBar}>
-        <View style={s.footerLeft}>
-          <Text style={s.footerCompany}>Urban Cruise Private Limited</Text>
+        <View>
+          <Text style={s.footerCompany}>Urban Cruise Mobiliry Solutions Private Limited</Text>
           <Text style={s.footerTagline}>India's Trusted Travel Partner</Text>
         </View>
         <Text style={s.footerWebsite}>www.urbancruise.in</Text>
@@ -418,14 +506,20 @@ export const ReceiptDocument: React.FC<{ data: ReceiptData; logoUri: string }> =
 /**
  * Render a receipt PDF to a Buffer.
  *
- * Image loading happens HERE, not at module load time (DIP fix).
- * Importing this module no longer touches the filesystem — safe in tests
- * and during container cold-starts where src/assets may be absent.
+ * Images and fonts are located HERE, not at module load time — importing
+ * this module never touches the filesystem.
  */
 export async function renderReceipt(data: ReceiptData): Promise<Buffer> {
   const { renderToBuffer } = await import('@react-pdf/renderer');
-  // Lazy: load image only when an actual render is requested.
+  const hasRupeeGlyph = ensureReceiptFont();
   const logoUri = loadImage(RECEIPT_LOGO_FILE);
-  const element = <ReceiptDocument data={data} logoUri={logoUri} />;
+  const element = (
+    <ReceiptDocument
+      data={data}
+      logoUri={logoUri}
+      fontFamily={hasRupeeGlyph ? RECEIPT_FONT_FAMILY : FALLBACK_FONT_FAMILY}
+      hasRupeeGlyph={hasRupeeGlyph}
+    />
+  );
   return renderToBuffer(element);
 }

@@ -219,3 +219,17 @@ export type DeviceMeta = {
   platform: 'ios' | 'android';
   appVersion: string;
 };
+
+/**
+ * Device as STORED on an auth_sessions row. Every column is nullable: a
+ * refresh that carries no device inherits the previous session's values,
+ * and those may be empty (rows written before fix H1 held the fake
+ * 'unknown-device', which is now stored as null instead). A DeviceMeta is
+ * always a valid SessionDevice.
+ */
+export type SessionDevice = {
+  id: string | null;
+  name: string | null;
+  platform: 'ios' | 'android' | null;
+  appVersion: string | null;
+};

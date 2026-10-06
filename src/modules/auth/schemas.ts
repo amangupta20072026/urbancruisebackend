@@ -57,6 +57,15 @@ export type VerifyOtpBody = z.infer<typeof VerifyOtpBody>;
 
 export const RefreshBody = z.object({
   refreshToken: z.string().min(20).max(4096),
+  /**
+   * The device making the refresh (same shape as on /otp/verify). Optional
+   * so older app builds that omit it still refresh. Fix H1: this field was
+   * missing from the schema, and Zod strips undeclared keys — the device the
+   * app DID send was silently dropped, every refreshed session was saved as
+   * a fake 'unknown-device', and logout then removed the wrong push token.
+   * When absent, the server copies the device from the previous session.
+   */
+  device: DeviceMetaSchema.optional(),
 });
 export type RefreshBody = z.infer<typeof RefreshBody>;
 

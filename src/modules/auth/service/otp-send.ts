@@ -23,6 +23,12 @@
  *                                       mobiles are exempt. Fails CLOSED if
  *                                       the CAPTCHA provider is unreachable.
  *   3. Reserve rate-limit quota        — ATOMIC: cooldown via SET NX, then
+ *                                       (every refusal is now recorded as an
+ *                                       otp_events 'rate_limited' row naming
+ *                                       the limit; the daily cap also logs
+ *                                       `alarm: 'otp_daily_cap_reached'` —
+ *                                       finding M3: someone can use up a
+ *                                       victim's daily OTPs on purpose)
  *                                       INCR every bucket and compare the
  *                                       post-increment value. Done BEFORE
  *                                       the account lookup (so the lookup is
@@ -178,7 +184,31 @@ export async function sendOtp(
 
   // 3. Reserve quota atomically (before the account lookup, so probing is
   //    throttled, and before any SMS, so parallel requests can't race past).
-  await reserveSendQuota(store, mobile, p.ip, isTest);
+  try {
+    await reserveSendQuota(store, mobile, p.ip, isTest);
+  } catch (err) {
+    if (err instanceof RateLimitError) {
+      // M3 visibility: without this row a quota-exhaustion attack left no
+      // trace in otp_events at all.
+      await audit(deps.audit, {
+        mobile,
+        role: p.role,
+        event: 'rate_limited',
+        ip: p.ip,
+        msg: err.code,
+        // No idempotencyKey here: otp_events.idempotency_key is UNIQUE, so
+        // tagging a refusal with it would block the success row of a later
+        // retry that uses the same key (see finding N3).
+      });
+      if (err.code === 'send_limit_day') {
+        logger.warn(
+          { alarm: 'otp_daily_cap_reached', mobile: maskMobile(mobile), role: p.role, ip: p.ip },
+          'otp send: daily OTP limit reached for this number — new logins blocked until it resets',
+        );
+      }
+    }
+    throw err;
+  }
 
   // 4. Vendor / UC / Driver must be a pre-existing, active account.
   if (p.role !== 'customer') {

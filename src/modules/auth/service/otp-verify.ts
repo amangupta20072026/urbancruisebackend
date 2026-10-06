@@ -28,6 +28,14 @@
  *                                { status: 'onboarding_required' }. The row
  *                                is created by POST /auth/customer/onboard.
  *   6. Mint the session (shared helper) and return { status: 'authenticated' }.
+ *
+ * LOCKOUT VISIBILITY (finding M3 — accepted trade-off, now monitored):
+ *   The brute-force lock protects the NUMBER, so anyone who knows a number
+ *   can lock it on purpose (request an OTP, type 5 wrong codes). That is
+ *   accepted — removing the lock would allow code guessing — but it must be
+ *   visible: the locking failure logs `alarm: 'otp_number_locked'` and its
+ *   otp_events row carries msg 'number_locked'. Existing sessions are not
+ *   affected by the lock; only new logins are refused while it lasts.
  * ==============================================================================
  */
 import { randomBytes } from 'node:crypto';
@@ -41,7 +49,8 @@ import {
 } from '../../../config/constants.js';
 import { sha256, safeEqual } from '../../../shared/utils/crypto.js';
 import { AuthError, ForbiddenError, RateLimitError } from '../../../shared/errors/index.js';
-import { normalizeMobile } from '../../../shared/utils/phone.js';
+import { normalizeMobile, maskMobile } from '../../../shared/utils/phone.js';
+import { logger } from '../../../shared/logger/index.js';
 import { AUTH_ERROR } from '../types.js';
 import type { VerifyOtpResponseDto, DeviceMeta } from '../types.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
@@ -124,14 +133,33 @@ export async function verifyOtp(
     // kept for visibility in mobile_registry and is reset when a lock is set.
     const fails = await store.incrementVerifyFail(mobile, VERIFY_FAIL_WINDOW_SECONDS);
     await repo.incrementVerifyFailure(mobile);
-    if (fails >= VERIFY_FAIL_LOCK_THRESHOLD) {
+    const locking = fails >= VERIFY_FAIL_LOCK_THRESHOLD;
+    if (locking) {
       const until = new Date(Date.now() + VERIFY_LOCK_DURATION_SECONDS * 1000);
       const captchaUntil = new Date(Date.now() + 60 * 60 * 1000);
       await repo.lockMobile(mobile, until, captchaUntil);
       await store.deleteVerifyFail(mobile);
       await store.deleteOtpSession(p.requestId); // a locked number needs a fresh OTP
+      // M3: make deliberate lockouts visible. Repeated alarms for one number
+      // (or one IP locking many numbers) means someone is doing it on purpose.
+      logger.warn(
+        {
+          alarm: 'otp_number_locked',
+          mobile: maskMobile(mobile),
+          role: p.role,
+          ip: p.ip,
+          lockedUntil: until.toISOString(),
+        },
+        'otp verify: number locked after too many wrong codes',
+      );
     }
-    await audit(deps.audit, { mobile, role: p.role, event: 'verify_failed', ip: p.ip });
+    await audit(deps.audit, {
+      mobile,
+      role: p.role,
+      event: 'verify_failed',
+      ip: p.ip,
+      ...(locking ? { msg: 'number_locked' } : {}),
+    });
     throw new AuthError('That code doesn\u2019t match.', AUTH_ERROR.OTP_INVALID);
   }
 

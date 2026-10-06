@@ -96,10 +96,38 @@ function createStore(name: string): RedisStore {
   });
 }
 
-/** Route express-rate-limit's own diagnostics into pino (default is console). */
+/**
+ * express-rate-limit's configuration checks (run once when a limiter is
+ * created) report problems as errors whose `code` starts with `ERR_ERL_`,
+ * e.g. ERR_ERL_KEY_GEN_IPV6. Those are mistakes in OUR limiter setup, not a
+ * Redis outage.
+ */
+function isLimiterConfigError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && code.startsWith('ERR_ERL_');
+}
+
+/**
+ * Route express-rate-limit's own diagnostics into pino (default is console).
+ *
+ * Two different alarms (fix): the library sends BOTH configuration-check
+ * failures and store (Redis) failures through `logger.error`. They used to
+ * share `alarm: 'rate_limit_store_down'`, so a code mistake in a limiter
+ * looked like a Redis outage at boot. Now:
+ *   rate_limit_misconfigured — a limiter's options are wrong; fix the code.
+ *   rate_limit_store_down    — Redis is failing; requests pass un-limited.
+ */
 const limiterLogger: Options['logger'] = {
-  error: (err, message) =>
-    logger.error({ err, alarm: 'rate_limit_store_down' }, message ?? 'rate limiter error'),
+  error: (err, message) => {
+    if (isLimiterConfigError(err)) {
+      logger.error(
+        { err, alarm: 'rate_limit_misconfigured' },
+        message ?? 'rate limiter configuration error — fix the limiter options',
+      );
+      return;
+    }
+    logger.error({ err, alarm: 'rate_limit_store_down' }, message ?? 'rate limiter error');
+  },
   warn: (err, message) => logger.warn({ err }, message ?? 'rate limiter warning'),
 };
 

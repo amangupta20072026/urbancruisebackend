@@ -2,7 +2,16 @@
  * ==============================================================================
  * PM2 ecosystem config
  * ==============================================================================
- * Usage on the server (after `npm ci --omit=dev && npm run build`):
+ * Usage on the server — build WITH dev dependencies, then prune them:
+ *
+ *     npm ci && npm run build && npm prune --omit=dev
+ *
+ *   `npm ci --omit=dev` alone cannot be used: `npm run build` needs `tsc`
+ *   and the @types/* packages, which are dev dependencies. Pruning after
+ *   the build leaves only runtime packages in node_modules. The `prepare`
+ *   script is `husky || true`, so a dev-less install never fails on husky.
+ *
+ * Then start / persist:
  *
  *     pm2 start ecosystem.config.cjs --env production
  *     pm2 save

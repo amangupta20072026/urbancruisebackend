@@ -15,7 +15,7 @@
     "format": "prettier --write .",
     "depcruise": "depcruise --config .depcruiserc.cjs src",
     "lint": "eslint .",
-    "prepare": "husky"
+    "prepare": "husky || true"
   },
   "lint-staged": {
     "*.{ts,mts,cts}": [

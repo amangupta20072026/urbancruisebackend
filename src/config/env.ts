@@ -15,9 +15,19 @@
  * NOTE: `durationRegex` is imported from shared/utils/duration.ts — that
  * module also defines `ttlToSeconds` used by the auth service. One regex,
  * one parser: keeps the two in lockstep.
+ *
+ * FIREBASE (fix B2): FIREBASE_SERVICE_ACCOUNT_PATH is validated here like
+ * every other variable, AND the file it points to is checked at boot
+ * (exists, is a file, readable by this process, valid JSON with the
+ * service-account fields). Before, the variable was read directly from
+ * process.env inside shared/providers/firebase/admin.ts, so a missing or
+ * wrong value crashed the process with a raw stack trace while app.ts was
+ * being imported — and PM2 restarted it in a loop.
  * ==============================================================================
  */
 import 'dotenv/config';
+import { accessSync, constants as fsConstants, readFileSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { z } from 'zod';
 import { durationRegex } from '../shared/utils/duration.js';
 
@@ -72,6 +82,20 @@ const schema = z.object({
   MSG91_WEBHOOK_SECRET: z.string().min(32),
   MSG91_TEST_MOBILES: z.string().default(''),
   MSG91_TEST_OTP: z.string().regex(/^\d{6}$/),
+
+  // ── Firebase (push notifications) ───────────────────────────────────────
+  // Path to the service-account JSON downloaded from the Firebase console.
+  // Relative paths resolve against the process working directory (the
+  // project root under PM2). An ABSOLUTE path is recommended on servers.
+  // The file itself is checked after parsing — see checkFirebaseServiceAccount().
+  FIREBASE_SERVICE_ACCOUNT_PATH: z
+    .string({
+      error: () =>
+        'is required — set it to the path of the Firebase service-account JSON file ' +
+        '(e.g. FIREBASE_SERVICE_ACCOUNT_PATH=./firebase-service-account.json)',
+    })
+    .trim()
+    .min(1, 'must point to the Firebase service-account JSON file'),
 
   // ── JWT ─────────────────────────────────────────────────────────────────
   JWT_ACCESS_SECRET: secretSchema,
@@ -174,6 +198,61 @@ if (parsed.data.NODE_ENV === 'production' && !parsed.data.HCAPTCHA_SECRET) {
       '   lock itself. Set HCAPTCHA_SECRET once the mobile app renders hCaptcha.\n',
   );
 }
+
+/**
+ * Firebase service-account file check (fix B2).
+ *
+ * Runs at boot so a wrong path or an unreadable / broken file stops the
+ * process HERE with a readable message — instead of crashing later inside
+ * firebase-admin while app.ts is being imported.
+ *
+ * Only the presence of the required fields is checked; the values are never
+ * printed (the file contains a private key).
+ */
+function checkFirebaseServiceAccount(rawPath: string): void {
+  const fullPath = resolve(rawPath);
+  const fail = (reason: string): never => {
+    console.error(
+      `\n❌ FIREBASE_SERVICE_ACCOUNT_PATH: ${reason}\n` +
+        `   Configured value: ${rawPath}\n` +
+        `   Resolved to:      ${fullPath}\n`,
+    );
+    process.exit(1);
+  };
+
+  let isFile: boolean;
+  try {
+    isFile = statSync(fullPath).isFile();
+  } catch {
+    return fail('file not found.');
+  }
+  if (!isFile) fail('path exists but is not a file.');
+
+  try {
+    accessSync(fullPath, fsConstants.R_OK);
+  } catch {
+    fail('file exists but is not readable by the user running the app (check permissions).');
+  }
+
+  let json: unknown;
+  try {
+    json = JSON.parse(readFileSync(fullPath, 'utf8'));
+  } catch {
+    return fail('file is not valid JSON.');
+  }
+
+  const required = ['project_id', 'client_email', 'private_key'] as const;
+  const obj = (json ?? {}) as Record<string, unknown>;
+  const missing = required.filter(k => typeof obj[k] !== 'string' || obj[k] === '');
+  if (missing.length > 0) {
+    fail(
+      `file is not a Firebase service-account key (missing: ${missing.join(', ')}). ` +
+        'Download it from Firebase console → Project settings → Service accounts.',
+    );
+  }
+}
+
+checkFirebaseServiceAccount(parsed.data.FIREBASE_SERVICE_ACCOUNT_PATH);
 
 export const ENV = Object.freeze({
   ...parsed.data,

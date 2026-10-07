@@ -23,8 +23,16 @@
  *   - `wait_ready: true` + `listen_timeout` require the app to call
  *     `process.send('ready')` after the HTTP server has bound. Prevents PM2
  *     from routing traffic to a not-yet-ready worker. See src/server.ts.
- *   - `kill_timeout` is a hard-cap on graceful shutdown. src/server.ts drains
- *     within this window; anything longer means requests get force-killed.
+ *   - `kill_timeout` (finding M8) is how long PM2 waits after its stop signal
+ *     before it sends SIGKILL. It MUST be LONGER than SHUTDOWN_TIMEOUT_MS in
+ *     src/config/constants.ts (15 s): the app's own deadline has to fire
+ *     first so it can log "shutdown timed out" and exit by itself. When both
+ *     were 15 s, PM2's SIGKILL won the race and the final log lines were
+ *     lost (reproduced with PM2 7.0.4). 20 s = 15 s drain + 5 s margin.
+ *     PM2 passes this value to the app as process.env.kill_timeout, and
+ *     src/server.ts logs `alarm: 'shutdown_deadline_misconfigured'` at boot
+ *     if it is not at least SHUTDOWN_TIMEOUT_MS + SHUTDOWN_KILL_MARGIN_MS.
+ *     If you change one value, change the other.
  *   - Logs go to ./logs, which is gitignored. In prod, ship stdout via a log
  *     agent (Loki / CloudWatch / Datadog) — PM2 files are the fallback.
  * ==============================================================================
@@ -51,7 +59,7 @@ module.exports = {
 
       // Coordinated shutdown — PM2 sends SIGINT, expects clean exit inside window.
       shutdown_with_message: false,
-      kill_timeout: 15000,
+      kill_timeout: 20000, // > SHUTDOWN_TIMEOUT_MS (15000) — see M8 note above
 
       // Logs
       out_file: './logs/access.log',

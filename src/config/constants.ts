@@ -26,11 +26,27 @@ export const DEFAULT_PAGE_SIZE = 20;
 /** Max page size we'll honor even if the caller asks for more. */
 export const MAX_PAGE_SIZE = 100;
 
-/** Request timeout — belt to Nginx's braces. */
-export const REQUEST_TIMEOUT_MS = 30_000;
+/**
+ * How often Node checks open connections against requestTimeout /
+ * headersTimeout (finding L2). Node's default is 30 000 ms, which means a
+ * 30 s requestTimeout could take up to ~60 s to fire — measured: with the
+ * default interval, a 3 s limit closed a slow client only after 30 s; with
+ * 1 000 ms it closed at 3 s. The HTTP timeouts themselves are env-tunable
+ * (HTTP_*_TIMEOUT_MS in config/env.ts).
+ *
+ * (Replaces the old REQUEST_TIMEOUT_MS constant, which was never used.)
+ */
+export const HTTP_CONNECTIONS_CHECK_INTERVAL_MS = 1_000;
 
-/** How long the graceful shutdown drain has before we hard-exit. */
+/** How long the graceful shutdown drain has before we hard-exit.
+ *  PM2's `kill_timeout` (ecosystem.config.cjs) MUST be larger — at least
+ *  this + SHUTDOWN_KILL_MARGIN_MS — or PM2's SIGKILL races our own exit
+ *  (finding M8). server.ts checks this at boot. */
 export const SHUTDOWN_TIMEOUT_MS = 15_000;
+
+/** Minimum gap between our shutdown deadline and PM2's SIGKILL, so the
+ *  force-exit path still has time to write its final log line. */
+export const SHUTDOWN_KILL_MARGIN_MS = 2_000;
 
 /**
  * Per-dependency budget for the /ready probe (MySQL ping, Redis ping).

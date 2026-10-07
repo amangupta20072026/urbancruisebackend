@@ -97,6 +97,29 @@ const schema = z.object({
     .trim()
     .min(1, 'must point to the Firebase service-account JSON file'),
 
+  // ── HTTP server timeouts — finding L2 ──────────────────────────────────
+  // Applied to the Node HTTP server in src/server.ts. Node's own defaults
+  // let a client take 5 minutes to send one request (requestTimeout
+  // 300 000 ms) and close idle keep-alive connections after 5 s.
+  //
+  //   HTTP_REQUEST_TIMEOUT_MS  — max time to RECEIVE a whole request
+  //                              (headers + body) from Nginx. Does NOT limit
+  //                              how long a handler may take to respond.
+  //   HTTP_HEADERS_TIMEOUT_MS  — max time to receive the request headers.
+  //                              Must be <= HTTP_REQUEST_TIMEOUT_MS.
+  //   HTTP_KEEP_ALIVE_TIMEOUT_MS — how long an idle keep-alive connection
+  //                              from Nginx stays open. MUST be LONGER than
+  //                              Nginx's upstream `keepalive_timeout` (Nginx
+  //                              default 60s), so Node never closes a
+  //                              connection Nginx is about to reuse (that
+  //                              race shows up as 502s). Default 65 s.
+  //
+  // If your Nginx config changes `keepalive_timeout` in the upstream block,
+  // set HTTP_KEEP_ALIVE_TIMEOUT_MS above it.
+  HTTP_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300_000).default(30_000),
+  HTTP_HEADERS_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300_000).default(20_000),
+  HTTP_KEEP_ALIVE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600_000).default(65_000),
+
   // ── OTP anti-pumping: per-network (IP block) caps — finding M4 ──────────
   // Hourly OTP-send caps per IPv4 /24 and per IPv6 /64. See
   // modules/auth/service/ip-block-guard.ts for the full decision.
@@ -193,6 +216,19 @@ if (!parsed.success) {
  */
 if (parsed.data.JWT_ACCESS_SECRET === parsed.data.JWT_REFRESH_SECRET) {
   console.error('\n❌ JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be DIFFERENT values.\n');
+  process.exit(1);
+}
+
+/**
+ * HTTP timeouts (L2): Node stops waiting for headers at whichever limit is
+ * shorter, so headers > request would silently be ignored. Refuse to boot
+ * on a combination that cannot mean what it says.
+ */
+if (parsed.data.HTTP_HEADERS_TIMEOUT_MS > parsed.data.HTTP_REQUEST_TIMEOUT_MS) {
+  console.error(
+    `\n❌ HTTP_HEADERS_TIMEOUT_MS (${parsed.data.HTTP_HEADERS_TIMEOUT_MS}) must be <= ` +
+      `HTTP_REQUEST_TIMEOUT_MS (${parsed.data.HTTP_REQUEST_TIMEOUT_MS}).\n`,
+  );
   process.exit(1);
 }
 

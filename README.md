@@ -1,14 +1,21 @@
-S — Single Responsibility Principle
-Each module/class/function should have one reason to change.
+Follow these guidelines throughout the design process and when writing code, wherever and whenever applicable.
 
-O — Open/Closed Principle
-Open for extension, closed for modification.
+### S — Single Responsibility Principle
 
-L — Liskov Substitution Principle
-Subtypes must be substitutable for their base type without breaking behaviour.
+Each module, class, or function should have **one clear responsibility** and, ideally, **one reason to change**.
 
-I — Interface Segregation Principle
-Clients should not depend on interfaces they don't use.
+### O — Open/Closed Principle
 
-D — Dependency Inversion Principle
-High-level modules should not depend on low-level modules. Both should depend on abstractions.
+Software entities should be **open for extension but closed for modification**. Prefer extending existing behaviour over changing stable, working code.
+
+### L — Liskov Substitution Principle
+
+Subtypes must be **substitutable for their base types** without altering or breaking the expected behaviour of the system.
+
+### I — Interface Segregation Principle
+
+Clients should **not be forced to depend on interfaces they do not use**. Prefer small, focused, role-specific interfaces over large, general-purpose ones.
+
+### D — Dependency Inversion Principle
+
+High-level modules should **not depend directly on low-level modules**. Both should depend on abstractions, with implementation details depending on those abstractions.

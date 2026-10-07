@@ -4,26 +4,20 @@
  *
  * Sub-modules:
  *   - customers
- *   - enquiries
  *   - quotations
- *   - bookings
- *   - trips
- *   - assignments
  *   - vendors
- *   - staff
+ *   - uc_staff
  *   - drivers
- *   - finance
- *   - payments
  *   - dashboard
- *   - performance
- *   - issues
+
+
  */
 import { Router } from 'express';
 export default {
   mount(): Router {
     const r = Router();
     // TODO(step-2): mount sub-module routers here, e.g.
-    //   r.use('/bookings', bookingsRoutes);
+    //   r.use('/customers', customersRoutes);
     return r;
   },
 };

@@ -10,7 +10,11 @@
  * ==============================================================================
  */
 
-import type { IOtpSessionStore, IdempotencySnapshot } from '../ports/IOtpSessionStore.js';
+import type {
+  IOtpSessionStore,
+  IdempotencySnapshot,
+  IpBlockWindow,
+} from '../ports/IOtpSessionStore.js';
 import type { OtpSession, OnboardingTicket } from '../types.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
 import { redis } from '../../../shared/redis/client.js';
@@ -21,7 +25,7 @@ import {
   otpLastSent,
   otpRateMobile10m,
   otpRateMobileDay,
-  otpRateIpBlock,
+  otpIpBlockWindow,
   otpRateNumberPrefix,
   otpVerifyFail,
   jwtDeny,
@@ -47,6 +51,33 @@ const DECR_FLOOR_ZERO = `
 local v = tonumber(redis.call('GET', KEYS[1]) or '0')
 if v > 0 then return redis.call('DECR', KEYS[1]) end
 return 0`;
+
+/**
+ * IP-block window send (finding M4) — ONE atomic step:
+ *   HINCRBY s, set TTL on creation (or repair a TTL-less key), read v / f.
+ *   KEYS[1] = window hash, ARGV[1] = window seconds.
+ *   Returns { s, v, f, ttlSeconds }.
+ */
+const IP_BLOCK_SEND = `
+local s = redis.call('HINCRBY', KEYS[1], 's', 1)
+local ttl = redis.call('TTL', KEYS[1])
+if s == 1 or ttl < 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+  ttl = tonumber(ARGV[1])
+end
+local vf = redis.call('HMGET', KEYS[1], 'v', 'f')
+return { s, tonumber(vf[1] or '0'), tonumber(vf[2] or '0'), ttl }`;
+
+/** HINCRBY a field ONLY if the window already exists (never creates a key,
+ *  never touches the TTL). KEYS[1] = window hash, ARGV[1] = field. */
+const HINCR_IF_EXISTS = `
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  return redis.call('HINCRBY', KEYS[1], ARGV[1], 1)
+end
+return 0`;
+
+/** Window length for the IP-block hash. */
+const IP_BLOCK_WINDOW_SECONDS = 3_600;
 
 async function incrWithTtl(key: string, ttlSeconds: number): Promise<number> {
   return Number(await redis.eval(INCR_WITH_TTL, 1, key, ttlSeconds));
@@ -136,8 +167,27 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
 
   // ── Rate-limit counters (anti-pumping) — all atomic ─────────────────────
 
-  async incrementSendCountIpBlock(ipBlockKey: string): Promise<number> {
-    return incrWithTtl(otpRateIpBlock(ipBlockKey), 3_600);
+  async recordIpBlockSend(ipBlockKey: string): Promise<IpBlockWindow> {
+    const raw = (await redis.eval(
+      IP_BLOCK_SEND,
+      1,
+      otpIpBlockWindow(ipBlockKey),
+      IP_BLOCK_WINDOW_SECONDS,
+    )) as [number, number, number, number];
+    return {
+      sends: Number(raw[0]),
+      verifies: Number(raw[1]),
+      failures: Number(raw[2]),
+      ttlSeconds: Math.max(1, Number(raw[3])),
+    };
+  }
+
+  async recordIpBlockVerify(ipBlockKey: string): Promise<void> {
+    await redis.eval(HINCR_IF_EXISTS, 1, otpIpBlockWindow(ipBlockKey), 'v');
+  }
+
+  async recordIpBlockSendFailure(ipBlockKey: string): Promise<void> {
+    await redis.eval(HINCR_IF_EXISTS, 1, otpIpBlockWindow(ipBlockKey), 'f');
   }
 
   async incrementSendCountPrefix(prefix: string): Promise<number> {

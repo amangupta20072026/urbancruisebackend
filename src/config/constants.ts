@@ -134,8 +134,8 @@ export const OTP_SEND_MIN_INTERVAL_SECONDS = 30;
  *
  *   IP-block limit — attackers behind a small IP range (VPN endpoints,
  *   botnet subnets, rented server ranges) share the /24 (or /64 for IPv6).
- *   Legitimate shared traffic (corporate NAT, coworking space, campus)
- *   also shares subnets; tune upward if such traffic trips it in your logs.
+ *   Legitimate shared traffic (carrier CGNAT, corporate NAT, campus) also
+ *   shares subnets, so this limit is conversion-aware and env-tunable.
  *
  *   Number-prefix limit — SMS pumping farms register blocks of numbers on
  *   a single mobile operator, which cluster on a narrow prefix range
@@ -146,8 +146,11 @@ export const OTP_SEND_MIN_INTERVAL_SECONDS = 30;
  * tooling should never trip anti-abuse limits.
  * ============================================================================== */
 
-/** Max OTP sends per IP subnet (IPv4 /24, IPv6 /64) per hour. */
-export const OTP_SEND_MAX_PER_IPBLOCK_PER_HOUR = 100;
+/* Per IP subnet (IPv4 /24, IPv6 /64) caps are NOT constants any more
+ * (finding M4): a flat 100/hour blocked genuine users behind carrier CGNAT.
+ * They are now env-tunable soft/hard caps with a conversion check — see
+ * OTP_IPV4_* / OTP_IPV6_* / OTP_IP_BLOCK_MIN_CONVERSION in config/env.ts and
+ * modules/auth/service/ip-block-guard.ts. */
 
 /** Max OTP sends per number prefix per hour. */
 export const OTP_SEND_MAX_PER_PREFIX_PER_HOUR = 500;

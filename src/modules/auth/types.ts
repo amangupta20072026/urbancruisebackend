@@ -75,6 +75,14 @@ export type OtpSession = {
   isTest: boolean;
   attempts: number;
   sentAt: number;
+  /**
+   * IP block (IPv4 /24 or IPv6 /64 key) charged when this OTP was SENT.
+   * A successful verify is credited to THIS block, not the verify request's
+   * IP — mobile devices often change IP between send and verify. null for
+   * test mobiles / unknown IP. Optional: sessions written before the M4
+   * deploy don't have it (they simply aren't credited).
+   */
+  ipBlock?: string | null;
 };
 
 /* ==============================================================================

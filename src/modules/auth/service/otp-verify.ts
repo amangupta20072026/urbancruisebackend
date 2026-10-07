@@ -29,6 +29,12 @@
  *                                is created by POST /auth/customer/onboard.
  *   6. Mint the session (shared helper) and return { status: 'authenticated' }.
  *
+ * IP-BLOCK CONVERSION (finding M4):
+ *   A successful claim credits one verify to the IP block the OTP was SENT
+ *   from (stored on the session). That conversion signal is what lets busy
+ *   carrier-CGNAT networks past the per-network soft cap while SMS-pumping
+ *   ranges — whose OTPs are never typed in — stay blocked.
+ *
  * LOCKOUT VISIBILITY (finding M3 — accepted trade-off, now monitored):
  *   The brute-force lock protects the NUMBER, so anyone who knows a number
  *   can lock it on purpose (request an OTP, type 5 wrong codes). That is
@@ -173,6 +179,7 @@ export async function verifyOtp(
     audit(deps.audit, { mobile, role: p.role, event: 'verify_succeeded', ip: p.ip }),
     repo.resetVerifyFailure(mobile),
     store.deleteVerifyFail(mobile),
+    creditIpBlockVerify(store, session.ipBlock, session.isTest),
   ]);
 
   // 5. Resolve account
@@ -234,4 +241,22 @@ export async function verifyOtp(
     ip: p.ip,
     userAgent: p.userAgent,
   });
+}
+
+/**
+ * Best-effort: a Redis hiccup here must never fail a login that has already
+ * been verified. Worst case the block's conversion reads slightly low.
+ * Test mobiles are never charged to a block, so never credited either.
+ */
+async function creditIpBlockVerify(
+  store: AuthServiceDeps['store'],
+  ipBlock: string | null | undefined,
+  isTest: boolean,
+): Promise<void> {
+  if (!ipBlock || isTest) return;
+  try {
+    await store.recordIpBlockVerify(ipBlock);
+  } catch (err) {
+    logger.warn({ err, ipBlock }, 'otp verify: could not credit IP-block conversion');
+  }
 }

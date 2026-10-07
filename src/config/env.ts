@@ -97,6 +97,24 @@ const schema = z.object({
     .trim()
     .min(1, 'must point to the Firebase service-account JSON file'),
 
+  // ── OTP anti-pumping: per-network (IP block) caps — finding M4 ──────────
+  // Hourly OTP-send caps per IPv4 /24 and per IPv6 /64. See
+  // modules/auth/service/ip-block-guard.ts for the full decision.
+  //   ≤ SOFT cap            → always allowed
+  //   SOFT < sends ≤ HARD   → allowed only while the block's OTP conversion
+  //                           (verified ÷ delivered) ≥ OTP_IP_BLOCK_MIN_CONVERSION
+  //   > HARD cap            → always refused (worst-case spend ceiling)
+  // The defaults below are STARTING VALUES, not measured ones. IPv4 starts
+  // higher because carrier CGNAT puts many users behind one /24. Tune both
+  // families from production data (otp_events + the `otp_ip_block_soft` /
+  // `otp_ip_block_limit` alarms) — a restart with new values is enough,
+  // no code change.
+  OTP_IPV4_BLOCK_SOFT_CAP_PER_HOUR: z.coerce.number().int().positive().default(100),
+  OTP_IPV4_BLOCK_HARD_CAP_PER_HOUR: z.coerce.number().int().positive().default(1000),
+  OTP_IPV6_BLOCK_SOFT_CAP_PER_HOUR: z.coerce.number().int().positive().default(20),
+  OTP_IPV6_BLOCK_HARD_CAP_PER_HOUR: z.coerce.number().int().positive().default(200),
+  OTP_IP_BLOCK_MIN_CONVERSION: z.coerce.number().min(0).max(1).default(0.25),
+
   // ── JWT ─────────────────────────────────────────────────────────────────
   JWT_ACCESS_SECRET: secretSchema,
   JWT_REFRESH_SECRET: secretSchema,
@@ -176,6 +194,23 @@ if (!parsed.success) {
 if (parsed.data.JWT_ACCESS_SECRET === parsed.data.JWT_REFRESH_SECRET) {
   console.error('\n❌ JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be DIFFERENT values.\n');
   process.exit(1);
+}
+
+/**
+ * OTP IP-block caps (M4): a hard cap below its soft cap would make the
+ * conversion check unreachable and silently turn the hard cap into the
+ * real limit — exactly the false-positive M4 is about. Refuse to boot.
+ */
+for (const fam of ['IPV4', 'IPV6'] as const) {
+  const soft = parsed.data[`OTP_${fam}_BLOCK_SOFT_CAP_PER_HOUR`];
+  const hard = parsed.data[`OTP_${fam}_BLOCK_HARD_CAP_PER_HOUR`];
+  if (hard < soft) {
+    console.error(
+      `\n❌ OTP_${fam}_BLOCK_HARD_CAP_PER_HOUR (${hard}) must be >= ` +
+        `OTP_${fam}_BLOCK_SOFT_CAP_PER_HOUR (${soft}).\n`,
+    );
+    process.exit(1);
+  }
 }
 
 /**

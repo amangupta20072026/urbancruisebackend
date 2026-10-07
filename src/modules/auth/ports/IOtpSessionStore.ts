@@ -39,6 +39,16 @@
 import type { OtpSession, RequestOtpResponseDto, OnboardingTicket } from '../types.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
 
+/** Counters for one IP block's current hourly window (post-increment).
+ *  Consumed by service/ip-block-guard.ts (finding M4). */
+export type IpBlockWindow = {
+  sends: number;
+  verifies: number;
+  failures: number;
+  /** Seconds until this window expires (≥ 1). Used for Retry-After. */
+  ttlSeconds: number;
+};
+
 /* --------------------------------------------------------------------------
  * Idempotency snapshot shape — stored as JSON, keyed by idempotency-key.
  * -------------------------------------------------------------------------- */
@@ -157,11 +167,27 @@ export interface IOtpSessionStore {
   // ── Rate-limit counters (anti-pumping) ────────────────────────────────────
 
   /**
-   * Atomically increment the IP-block hourly counter (IPv4 /24 or IPv6 /64,
-   * already bucketed e.g. "v4:203.0.113") and return the NEW value. TTL
-   * (3 600 s) is set on first increment.
+   * Atomically count one OTP send against the IP block's hourly window
+   * (IPv4 /24 or IPv6 /64, already bucketed e.g. "v4:203.0.113") and return
+   * the window's POST-increment counters + remaining TTL in one step. The
+   * 3 600 s TTL is set when the window is created. (Finding M4.)
    */
-  incrementSendCountIpBlock(ipBlockKey: string): Promise<number>;
+  recordIpBlockSend(ipBlockKey: string): Promise<IpBlockWindow>;
+
+  /**
+   * Credit one successful verification to the block the OTP was SENT from.
+   * Only touches an existing window (never creates one), so it cannot
+   * extend a window's life or create a key without a TTL.
+   */
+  recordIpBlockVerify(ipBlockKey: string): Promise<void>;
+
+  /**
+   * Record a definitive provider send failure for the block, so an MSG91
+   * outage does not depress the block's conversion rate. Like verify, it
+   * only touches an existing window. The send itself is NOT refunded —
+   * the hard cap still counts it.
+   */
+  recordIpBlockSendFailure(ipBlockKey: string): Promise<void>;
 
   /**
    * Atomically increment the number-prefix hourly counter and return the NEW

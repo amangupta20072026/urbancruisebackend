@@ -44,10 +44,16 @@ export const otpLastSent = (mobile: string): string => `otp:lastsent:${mobile}`;
 /** Rate-limit per source IP (per hour). */
 export const otpRateIpHour = (ip: string): string => `otp:rate:ip:${ip}:1h`;
 
-/** Rate-limit per IP subnet (IPv4 /24, IPv6 /64) per hour. Catches SMS
- *  pumping traffic that clusters in a small IP range — bypasses the
- *  per-mobile buckets by rotating target numbers, but shares the subnet. */
-export const otpRateIpBlock = (ipBlock: string): string => `otp:rate:ipblock:${ipBlock}:1h`;
+/** Hourly window per IP subnet (IPv4 /24, IPv6 /64) — a HASH with fields
+ *  s (sends), v (verifies), f (provider failures). Catches SMS pumping that
+ *  clusters in a small IP range while letting busy carrier-CGNAT ranges
+ *  through when their OTPs are actually being verified (finding M4).
+ *
+ *  `v2` because the previous key at `otp:rate:ipblock:<block>:1h` was a
+ *  plain STRING counter: reusing that name for a HASH would raise WRONGTYPE
+ *  on every request for up to an hour after deploy. Old keys expire on
+ *  their own (1 h TTL). */
+export const otpIpBlockWindow = (ipBlock: string): string => `otp:ipblock:v2:${ipBlock}:1h`;
 
 /** Rate-limit per mobile-number prefix (per hour). Catches SMS pumping
  *  farms that hold blocks of numbers on a single operator's pool, which

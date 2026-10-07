@@ -184,8 +184,9 @@ export async function sendOtp(
 
   // 3. Reserve quota atomically (before the account lookup, so probing is
   //    throttled, and before any SMS, so parallel requests can't race past).
+  let reserved: { ipBlock: string | null };
   try {
-    await reserveSendQuota(store, mobile, p.ip, isTest);
+    reserved = await reserveSendQuota(store, mobile, p.ip, isTest);
   } catch (err) {
     if (err instanceof RateLimitError) {
       // M3 visibility: without this row a quota-exhaustion attack left no
@@ -257,6 +258,7 @@ export async function sendOtp(
     isTest,
     attempts: 0,
     sentAt: Date.now(),
+    ipBlock: reserved.ipBlock,
   };
 
   await store.setOtpSession(session, OTP_SESSION_TTL_SECONDS);
@@ -276,7 +278,10 @@ export async function sendOtp(
       logDispatchFailure(mobile, p.role, dispatch);
       // Nothing was sent: drop the now-useless OTP session and give the user
       // their quota back so an MSG91 outage doesn't lock them out.
-      await Promise.all([store.deleteOtpSession(requestId), refundSendQuota(store, mobile)]);
+      await Promise.all([
+        store.deleteOtpSession(requestId),
+        refundSendQuota(store, mobile, reserved.ipBlock),
+      ]);
       await audit(deps.audit, {
         mobile,
         role: p.role,

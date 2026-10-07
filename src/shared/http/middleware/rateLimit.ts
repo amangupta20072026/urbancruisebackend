@@ -31,6 +31,7 @@ import rateLimit, {
 import { RedisStore, type RedisReply } from 'rate-limit-redis';
 import type { Request } from 'express';
 import { ENV } from '../../../config/env.js';
+import { IPV6_RATE_LIMIT_SUBNET } from '../../../config/constants.js';
 import { RateLimitError } from '../../errors/index.js';
 import { logger } from '../../logger/index.js';
 import { redis } from '../../redis/client.js';
@@ -132,6 +133,25 @@ const limiterLogger: Options['logger'] = {
 };
 
 /* ==============================================================================
+ * Client IP key — the ONE way limiters turn a request into an IP bucket
+ * ==============================================================================
+ * IPv4 → the address. IPv6 → its /IPV6_RATE_LIMIT_SUBNET network (64), so a
+ * client cannot dodge a limit by rotating the interface-identifier half of
+ * its address. IPv4-mapped IPv6 (::ffff:a.b.c.d) → the IPv4 address.
+ *
+ * Use it in every custom keyGenerator instead of calling ipKeyGenerator()
+ * yourself — that keeps the subnet identical across all limiters.
+ *
+ * It takes the REQUEST (not req.ip) on purpose: express-rate-limit checks a
+ * keyGenerator's source text, and flags (ERR_ERL_KEY_GEN_IPV6) any that
+ * mentions `req.ip` without `ipKeyGenerator`. Passing `req` keeps that
+ * check quiet while the normalisation still happens here.
+ * ============================================================================== */
+export function clientIpKey(req: Request): string {
+  return ipKeyGenerator(req.ip ?? '', IPV6_RATE_LIMIT_SUBNET);
+}
+
+/* ==============================================================================
  * Factory
  * ============================================================================== */
 
@@ -143,7 +163,9 @@ export type RateLimiterOptions = {
   limit: number;
   /** Message in the 429 envelope. The `code` is always RATE_LIMITED. */
   message?: string;
-  /** Custom bucket key. Defaults to the client IP (IPv6 normalised to /64). */
+  /** Custom bucket key. Defaults to clientIpKey() — the client IP, IPv6
+   *  grouped by IPV6_RATE_LIMIT_SUBNET (/64). Custom generators that need
+   *  the IP must call clientIpKey(req), never use req.ip raw. */
   keyGenerator?: (req: Request) => string;
 };
 
@@ -173,7 +195,7 @@ export function createRateLimiter(o: RateLimiterOptions): RateLimitRequestHandle
     store: createStore(o.name),
     passOnStoreError: true,
     logger: limiterLogger,
-    keyGenerator: o.keyGenerator ?? (req => ipKeyGenerator(req.ip ?? '')),
+    keyGenerator: o.keyGenerator ?? clientIpKey,
     handler,
   });
 }

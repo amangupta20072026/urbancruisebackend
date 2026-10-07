@@ -38,6 +38,27 @@ export const MAX_PAGE_SIZE = 100;
  */
 export const HTTP_CONNECTIONS_CHECK_INTERVAL_MS = 1_000;
 
+/**
+ * IPv6 prefix length used to group clients in the HTTP rate limiters
+ * (finding M5 follow-up). Single source of truth — used via clientIpKey()
+ * in shared/http/middleware/rateLimit.ts.
+ *
+ * WHY /64 (not express-rate-limit's default /56):
+ *   The API is consumed by native mobile apps. 3GPP TS 23.401 §5.3.1.2.2:
+ *   the PDN gateway gives each UE "a globally unique /64 IPv6 prefix". So
+ *   /64 ≈ one device. /56 would put up to 256 such /64s in one bucket —
+ *   if those belong to different subscribers they would share one limit.
+ *   Trade-off: a client holding a larger block can spread across /64s.
+ *   These HTTP limiters are a coarse outer guard; the OTP endpoints' real
+ *   limits (per-mobile, per-network with conversion, per-prefix) live in
+ *   modules/auth/service/rate-limits.ts and do not depend on this value.
+ *
+ * Passed EXPLICITLY so a library default change can never silently change
+ * how users are grouped. Kept equal to the /64 used by bucketIp()
+ * (shared/utils/ip-bucket.ts) so both limiters group a device the same way.
+ */
+export const IPV6_RATE_LIMIT_SUBNET = 64;
+
 /** How long the graceful shutdown drain has before we hard-exit.
  *  PM2's `kill_timeout` (ecosystem.config.cjs) MUST be larger — at least
  *  this + SHUTDOWN_KILL_MARGIN_MS — or PM2's SIGKILL races our own exit

@@ -22,10 +22,9 @@
  * ==============================================================================
  */
 import { Router } from 'express';
-import { ipKeyGenerator } from 'express-rate-limit';
 import { validate } from '../../shared/http/middleware/validate.js';
 import { authenticate } from '../../shared/http/middleware/authenticate.js';
-import { createRateLimiter } from '../../shared/http/middleware/rateLimit.js';
+import { clientIpKey, createRateLimiter } from '../../shared/http/middleware/rateLimit.js';
 import { ENV } from '../../config/env.js';
 import {
   RequestOtpBody,
@@ -57,10 +56,10 @@ const otpLimiter = createRateLimiter({
   // Key by IP + phone-in-body — an attacker who rotates IP but hammers one
   // number still trips the limiter. Redis-backed per-mobile limits inside
   // the service catch phone-only enumeration.
-  // NOTE: `ipKeyGenerator(req.ip)` normalises IPv6 to a /64 prefix so IPv6
-  // users can't bypass the limit by rotating the interface identifier.
+  // NOTE: clientIpKey() groups IPv6 by /64 (IPV6_RATE_LIMIT_SUBNET), so
+  // IPv6 users can't bypass the limit by rotating the interface identifier.
   keyGenerator: req => {
-    const ipKey = ipKeyGenerator(req.ip ?? '');
+    const ipKey = clientIpKey(req);
     // Runs BEFORE validate(), so `phone` is raw client input. Cap its length:
     // it becomes part of a Redis key, and a real phone is 10 digits.
     const phone = String((req.body as { phone?: unknown })?.phone ?? '').slice(0, 16);

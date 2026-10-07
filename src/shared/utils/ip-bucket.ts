@@ -10,8 +10,12 @@
  * WHY /24 AND /64:
  *   Legitimate corporate NAT / campus / coworking traffic shares a small
  *   IPv4 subnet, so /24 is coarse enough not to false-positive on the good
- *   guys while still catching attackers behind a small VPN pool. RFC 6177
- *   defines /64 as the standard end-site allocation for IPv6.
+ *   guys while still catching attackers behind a small VPN pool. For IPv6,
+ *   mobile networks give each device its own /64 (3GPP TS 23.401
+ *   §5.3.1.2.2), so /64 ≈ one device. (RFC 6177 does NOT fix a standard
+ *   end-site size — it leaves it to operators, typically /48 to /64.)
+ *   Keep this equal to IPV6_RATE_LIMIT_SUBNET (config/constants.ts) so the
+ *   OTP network cap and the HTTP rate limiters group a device the same way.
  *
  * Extracted from src/modules/auth/service.ts (formerly ~lines 970-1015).
  * Kept UNIT-testable: no Redis / no logger / no DB — pure functions of a

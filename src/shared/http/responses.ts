@@ -8,7 +8,7 @@
  * ==============================================================================
  */
 import type { Request, Response } from 'express';
-import type { ApiResponse, Paginated } from '../types/api.js';
+import type { ApiResponse, PageMeta, Paginated } from '../types/api.js';
 import { ForbiddenError } from '../errors/index.js';
 import type { Identity } from '../types/identity.js';
 
@@ -28,12 +28,18 @@ export function noContent(res: Response): Response {
   return res.status(204).end();
 }
 
+/**
+ * Page envelope. `meta` (optional) carries list-level facts such as an
+ * unread count; it is omitted from the JSON entirely when not supplied, so
+ * existing endpoints' responses are byte-for-byte unchanged.
+ */
 export function paginated<T>(
   res: Response,
   data: T[],
   page: number,
   pageSize: number,
   total: number,
+  meta?: PageMeta,
 ): Response {
   const req = res.req as Request;
   const body: Paginated<T> = {
@@ -42,6 +48,7 @@ export function paginated<T>(
     pageSize,
     total,
     hasNext: page * pageSize < total,
+    ...(meta !== undefined ? { meta } : {}),
     requestId: String(req.id),
   };
   return res.status(200).json(body);

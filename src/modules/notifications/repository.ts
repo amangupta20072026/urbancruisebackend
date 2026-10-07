@@ -176,8 +176,11 @@ export async function updateNotificationFcmId(params: {
  * List notifications for a user, newest first, with optional filters.
  */
 type NotificationDbRow = RowDataPacket & NotificationRow;
-type CountRow = RowDataPacket & { total: number };
-type UnreadCountRow = RowDataPacket & { unread_count: number };
+// COUNT(*) is a BIGINT, and the shared pool runs with bigNumberStrings: true
+// (shared/db/pool.ts), so mysql2 returns these as STRINGS. Typed as such
+// and converted with Number() below — a count never exceeds 2^53.
+type CountRow = RowDataPacket & { total: string | number };
+type UnreadCountRow = RowDataPacket & { unread_count: string | number };
 
 export async function listNotifications(params: {
   role: UserRole;
@@ -227,8 +230,8 @@ export async function listNotifications(params: {
 
   return {
     rows,
-    total: countRows[0]?.total ?? 0,
-    unreadCount: unreadRows[0]?.unread_count ?? 0,
+    total: Number(countRows[0]?.total ?? 0),
+    unreadCount: Number(unreadRows[0]?.unread_count ?? 0),
   };
 }
 

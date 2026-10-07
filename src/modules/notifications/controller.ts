@@ -57,6 +57,15 @@ export async function deleteUnregisterToken(req: Request, res: Response): Promis
 /**
  * GET /notifications
  * Paginated notification inbox for the authenticated user.
+ *
+ * Response (finding M6 — unreadCount used to be computed and then dropped):
+ *   { data, page, pageSize, total, hasNext,
+ *     meta: { unreadCount }, requestId }
+ *
+ * `meta.unreadCount` = this user's unread notifications. When the request
+ * filters by `category`, the count is for that category only (see
+ * repository.listNotifications). It ignores the `unread` filter and the
+ * page, so it is the right number for the app's badge.
  */
 export async function getNotifications(req: Request, res: Response): Promise<Response> {
   const identity = getIdentity(req);
@@ -72,7 +81,9 @@ export async function getNotifications(req: Request, res: Response): Promise<Res
     ...(query.unread !== undefined ? { unreadOnly: query.unread } : {}),
   });
 
-  return paginated(res, result.items, query.page, query.pageSize, result.total);
+  return paginated(res, result.items, query.page, query.pageSize, result.total, {
+    unreadCount: result.unreadCount,
+  });
 }
 
 /**

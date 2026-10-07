@@ -80,7 +80,7 @@ function initAdmin(): App {
     );
   }
 
-  logger.info({ path: accountPath }, 'firebase-admin initialized');
+  logger.info('firebase-admin initialized');
   return app;
 }
 

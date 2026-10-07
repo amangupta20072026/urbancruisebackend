@@ -227,17 +227,21 @@ export interface IOtpSessionStore {
   // ── Active-session index ──────────────────────────────────────────────────
 
   /**
-   * Add a jti to the active-session set for (role, entityId).
+   * Record a live session for (role, entityId) that ends at `expiresAt`
+   * (pass the same value stored in auth_sessions.expires_at). Atomically
+   * prunes members whose expiry has passed and sets the index's own expiry
+   * to its latest member's, so the index is bounded and self-deleting
+   * (finding L3). Informational only — revocation is driven by the DB.
    */
-  addActiveSession(role: UserRole, entityId: string, jti: string): Promise<void>;
+  addActiveSession(role: UserRole, entityId: string, jti: string, expiresAt: Date): Promise<void>;
 
   /**
-   * Remove a jti from the active-session set (logout / rotation).
+   * Remove a jti from the active-session index (logout / rotation).
    */
   removeActiveSession(role: UserRole, entityId: string, jti: string): Promise<void>;
 
   /**
-   * Delete the entire active-session set (logout-all).
+   * Delete the entire active-session index (logout-all).
    */
   clearActiveSessions(role: UserRole, entityId: string): Promise<void>;
 

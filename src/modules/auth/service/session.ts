@@ -248,7 +248,7 @@ export async function refreshSession(
 
   await Promise.all([
     store.removeActiveSession(row.role, row.entity_id, claims.jti),
-    store.addActiveSession(row.role, row.entity_id, newJti),
+    store.addActiveSession(row.role, row.entity_id, newJti, expiresAt),
     store.denySession(claims.jti, ttlToSeconds(ENV.JWT_ACCESS_TTL)),
   ]);
 

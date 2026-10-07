@@ -44,6 +44,8 @@ export async function mintAuthenticatedSession(
     sid: jti,
   });
 
+  // One value for the DB row AND the Redis index, so they always agree.
+  const expiresAt = expiryFromTtl(ENV.JWT_REFRESH_TTL);
   await repo.createSession({
     jti,
     role: user.role,
@@ -54,9 +56,9 @@ export async function mintAuthenticatedSession(
     device: ctx.device,
     ip: ctx.ip,
     userAgent: ctx.userAgent,
-    expiresAt: expiryFromTtl(ENV.JWT_REFRESH_TTL),
+    expiresAt,
   });
-  await store.addActiveSession(user.role, user.entityId, jti);
+  await store.addActiveSession(user.role, user.entityId, jti, expiresAt);
 
   const profile = await repo.loadProfile(user.role, user.entityId);
 

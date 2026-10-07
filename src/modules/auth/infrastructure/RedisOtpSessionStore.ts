@@ -30,6 +30,7 @@ import {
   otpVerifyFail,
   jwtDeny,
   sessionsActive,
+  legacySessionsActiveSet,
   onboardingTicket,
 } from '../../../shared/redis/keys.js';
 
@@ -75,6 +76,20 @@ if redis.call('EXISTS', KEYS[1]) == 1 then
   return redis.call('HINCRBY', KEYS[1], ARGV[1], 1)
 end
 return 0`;
+
+/**
+ * Live-session index add (finding L3) — ONE atomic step:
+ *   1. drop members whose expiry (score, epoch ms) is already past,
+ *   2. add this session with its expiry,
+ *   3. set the key to expire with its LATEST member.
+ * KEYS[1] = index ZSET, ARGV[1] = now ms, ARGV[2] = expiry ms, ARGV[3] = jti.
+ */
+const SESSION_INDEX_ADD = `
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+redis.call('ZADD', KEYS[1], ARGV[2], ARGV[3])
+local last = redis.call('ZRANGE', KEYS[1], -1, -1, 'WITHSCORES')
+redis.call('PEXPIREAT', KEYS[1], last[2])
+return 1`;
 
 /** Window length for the IP-block hash. */
 const IP_BLOCK_WINDOW_SECONDS = 3_600;
@@ -216,16 +231,33 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
 
   // ── Active-session index ─────────────────────────────────────────────────
 
-  async addActiveSession(role: UserRole, entityId: string, jti: string): Promise<void> {
-    await redis.sadd(sessionsActive(role, entityId), jti);
+  async addActiveSession(
+    role: UserRole,
+    entityId: string,
+    jti: string,
+    expiresAt: Date,
+  ): Promise<void> {
+    await Promise.all([
+      redis.eval(
+        SESSION_INDEX_ADD,
+        1,
+        sessionsActive(role, entityId),
+        Date.now(),
+        expiresAt.getTime(),
+        jti,
+      ),
+      // Separate command (not inside the script) so the two keys never need
+      // to share a cluster slot. UNLINK frees memory off the main thread.
+      redis.unlink(legacySessionsActiveSet(role, entityId)),
+    ]);
   }
 
   async removeActiveSession(role: UserRole, entityId: string, jti: string): Promise<void> {
-    await redis.srem(sessionsActive(role, entityId), jti);
+    await redis.zrem(sessionsActive(role, entityId), jti);
   }
 
   async clearActiveSessions(role: UserRole, entityId: string): Promise<void> {
-    await redis.del(sessionsActive(role, entityId));
+    await redis.unlink(sessionsActive(role, entityId), legacySessionsActiveSet(role, entityId));
   }
 
   async denyManySessions(jtis: string[], ttlSeconds: number): Promise<void> {

@@ -96,7 +96,25 @@ export const jwtDeny = (sid: string): string => `jwt:deny:${sid}`;
  * Session index — quickly enumerate active sessions for one entity
  * ----------------------------------------------------------------- */
 
+/** Live-session index for one account (finding L3). A SORTED SET:
+ *  member = session jti, score = that session's expiry (epoch ms, same
+ *  value as auth_sessions.expires_at). Expired members are pruned on every
+ *  add, and the key's own expiry is set to its LAST member's expiry, so it
+ *  can neither grow forever nor outlive the sessions it lists.
+ *
+ *  New name on purpose: the old index below was a plain SET, and reusing
+ *  its name for a ZSET would raise WRONGTYPE on accounts that still have
+ *  one. Its prefix (`sessions:live:`) does not overlap `sessions:active:`,
+ *  so a scan for the legacy pattern can never match a live key. */
 export const sessionsActive = (role: UserRole, entityId: string): string =>
+  `sessions:live:${role}:${entityId}`;
+
+/** LEGACY (pre-L3) active-session SET — no TTL, never pruned. No longer
+ *  written. Deleted opportunistically on login/refresh/logout-all for the
+ *  same account; leftovers for inactive accounts are removed by the
+ *  one-off cleanup in the L3 deploy notes. Remove this helper once that
+ *  cleanup has run in every environment. */
+export const legacySessionsActiveSet = (role: UserRole, entityId: string): string =>
   `sessions:active:${role}:${entityId}`;
 
 /* -----------------------------------------------------------------

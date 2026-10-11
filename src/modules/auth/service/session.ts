@@ -62,7 +62,7 @@ import type {
   DeviceMeta,
   SessionDevice,
 } from '../types.js';
-import type { UserRole, SubRole } from '../../../shared/rbac/roles.js';
+import type { UserRole } from '../../../shared/rbac/roles.js';
 import type { AuthServiceDeps } from '../infrastructure/AuthContainer.js';
 import type { RevokeReason } from '../ports/IAuthRepository.js';
 
@@ -174,12 +174,10 @@ export async function refreshSession(
 
   // Re-bind to the phone that started this session (audit fix #11).
   // Before this, refresh never re-checked WHO the phone belongs to: a vendor
-  // manager whose number was removed from the vendor row, or a staff member
-  // whose number was reassigned, kept access for the full 30-day refresh TTL,
-  // and a changed vendor sub-role was ignored until the next login.
-  // Re-running the login lookup on every refresh fixes both. Tokens issued
+  // whose login phone was changed, or a staff member whose number was
+  // reassigned, kept access for the full 30-day refresh TTL.
+  // Re-running the login lookup on every refresh fixes this. Tokens issued
   // before `mob` existed skip this and age out within JWT_REFRESH_TTL.
-  let subRole = (row.sub_role ?? null) as SubRole;
   if (claims.mob) {
     const current = await repo.findUserByPhone(row.role, claims.mob);
     if (!current || current.entityId !== row.entity_id) {
@@ -193,7 +191,6 @@ export async function refreshSession(
         AUTH_ERROR.SESSION_REVOKED,
       );
     }
-    subRole = current.subRole;
   }
 
   // Rotate: new jti + tokens (carrying the phone binding forward)
@@ -206,7 +203,6 @@ export async function refreshSession(
   const newAccess = signAccessToken({
     sub: claims.sub as string,
     role: row.role,
-    subRole,
     entityId: row.entity_id,
     sid: newJti,
   });
@@ -217,7 +213,6 @@ export async function refreshSession(
     jti: newJti,
     role: row.role,
     entityId: row.entity_id,
-    subRole,
     refreshTokenHash: newHash,
     previousJti: claims.jti,
     device: resolveRefreshDevice(sentDevice, row),
@@ -304,7 +299,6 @@ export async function logout(deps: AuthServiceDeps, p: LogoutParams): Promise<vo
 export type GetMeParams = {
   identityUserId: string;
   identityRole: UserRole;
-  identitySubRole: SubRole;
   identityEntityId: string;
   identitySessionId: string;
 };
@@ -343,7 +337,6 @@ export async function getMe(deps: AuthServiceDeps, p: GetMeParams): Promise<MeRe
   return {
     userId: p.identityUserId,
     role: p.identityRole,
-    subRole: p.identitySubRole,
     entityId: p.identityEntityId,
     requiresProfileSetup: details.requiresProfileSetup,
     profile: details.profile,

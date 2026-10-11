@@ -39,7 +39,6 @@ export async function mintAuthenticatedSession(
   const access = signAccessToken({
     sub: user.userId,
     role: user.role,
-    subRole: user.subRole,
     entityId: user.entityId,
     sid: jti,
   });
@@ -50,7 +49,6 @@ export async function mintAuthenticatedSession(
     jti,
     role: user.role,
     entityId: user.entityId,
-    subRole: user.subRole,
     refreshTokenHash: hashForStorage(refresh),
     previousJti: null,
     device: ctx.device,
@@ -78,7 +76,6 @@ export async function mintAuthenticatedSession(
     refreshToken: refresh,
     userId: user.userId,
     role: user.role,
-    subRole: user.subRole,
     entityId: user.entityId,
     requiresProfileSetup: user.requiresProfileSetup,
     profile,

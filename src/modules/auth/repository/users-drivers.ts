@@ -55,7 +55,6 @@ export async function findDriverByPhone(mobile: string): Promise<ResolvedUser | 
     role: 'driver',
     entityId: String(r.id),
     userId: String(r.id),
-    subRole: null,
     status: 'active',
     requiresProfileSetup: false,
   };

@@ -11,7 +11,7 @@
  *
  * ROLE FILES
  *   users-customers.ts  — customers table
- *   users-vendors.ts    — vendors table (sub-role derivation included)
+ *   users-vendors.ts    — vendors table (login by `phone` only)
  *   users-drivers.ts    — drivers table
  *   users-uc-staff.ts   — uc_staff table
  *   users-shared.ts     — candidateFormats, normStatus, normalisePhoneToE164,

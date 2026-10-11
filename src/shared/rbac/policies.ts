@@ -13,8 +13,7 @@
  * compile until every relevant subject has explicit coverage.
  *
  * Deliberately kept in ONE file so a security auditor has ONE table to read.
- * If policies branch on sub-role (e.g. corporate booking-person can't delete
- * a booking), express it here — not scattered across controllers.
+ * Rules are decided by top-level role only — there is no sub-role.
  * ==============================================================================
  */
 import type { Identity } from '../types/identity.js';
@@ -25,12 +24,6 @@ type Rule = (id: Identity) => boolean;
 
 const anyCustomer: Rule = id => id.role === 'customer';
 const nobody: Rule = () => false;
-
-/**
- * Corporate admin can do destructive things a corporate booking-person can't.
- * Personal / agent customers have subRole=null and don't hit this branch.
- */
-const corporateAdminOnly: Rule = id => id.role === 'customer' && id.subRole === 'admin';
 
 /**
  * Matrix key = `${action}:${subject}`. Each cell is a predicate over Identity.
@@ -51,9 +44,6 @@ const MATRIX: Record<string, Rule> = {
   'create:Booking': anyCustomer,
   'update:Booking': anyCustomer,
   'acknowledge:Booking': anyCustomer,
-  // Deleting a booking is high-impact — corporate booking-persons should NOT
-  // be able to erase records their admin depends on for reconciliation.
-  'delete:Booking': corporateAdminOnly,
 
   // Trips (read-only from customer side; state transitions are driver/UC-side)
   'read:Trip': anyCustomer,

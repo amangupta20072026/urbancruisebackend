@@ -12,7 +12,7 @@
  * then handle them in the client.
  * ==============================================================================
  */
-import type { UserRole, SubRole } from '../../shared/rbac/roles.js';
+import type { UserRole } from '../../shared/rbac/roles.js';
 
 /* ==============================================================================
  * Error codes surfaced to the client (in ApiError.code)
@@ -93,7 +93,6 @@ export type ResolvedUser = {
   role: UserRole;
   entityId: string;
   userId: string;
-  subRole: SubRole;
   /**
    * 'active'   — may log in.
    * 'inactive' — exists but must NOT log in (suspended, left, blocked, or any
@@ -112,7 +111,6 @@ export type AuthSessionRow = {
   jti: string;
   role: UserRole;
   entity_id: string;
-  sub_role: string | null;
   refresh_token_hash: string;
   previous_jti: string | null;
   device_id: string | null;
@@ -149,7 +147,6 @@ export type AuthenticatedResponseDto = {
   refreshToken: string;
   userId: string;
   role: UserRole;
-  subRole: SubRole;
   entityId: string;
   requiresProfileSetup: boolean;
   profile: UserProfileDto;
@@ -211,7 +208,6 @@ export type RefreshResponseDto = {
 export type MeResponseDto = {
   userId: string;
   role: UserRole;
-  subRole: SubRole;
   entityId: string;
   requiresProfileSetup: boolean;
   profile: UserProfileDto;

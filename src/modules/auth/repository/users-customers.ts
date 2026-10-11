@@ -54,7 +54,6 @@ function toResolved(r: CustomerRow): ResolvedUser {
     role: 'customer',
     entityId: String(r.id),
     userId: String(r.id),
-    subRole: null,
     status: 'active',
     requiresProfileSetup: !r.firstName || r.firstName.trim() === '',
   };
@@ -137,7 +136,6 @@ export async function createCustomerIfAbsent(
           role: 'customer',
           entityId: id,
           userId: id,
-          subRole: null,
           status: 'active',
           requiresProfileSetup: false,
         },

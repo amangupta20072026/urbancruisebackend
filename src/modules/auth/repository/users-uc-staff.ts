@@ -49,7 +49,6 @@ export async function findUcStaffByPhone(mobile: string): Promise<ResolvedUser |
     role: 'uc',
     entityId: String(r.id),
     userId: String(r.id),
-    subRole: null,
     status: normStatus(r.status, { nullIsActive: false }),
     requiresProfileSetup: false,
   };

@@ -58,17 +58,6 @@ export type CustomerClassification =
   | { category: 'corporate'; type: CorporateCustomerType; companyName: string }
   | { category: 'agent'; type: AgentCustomerType; companyName: string };
 
-// ── Sub-roles ──────────────────────────────────────────────────────────────
-// Corporate customers can have multiple logins under the same CustomerId with
-// different privileges — a booking-person places bookings, an admin can also
-// manage seats / cancel / pay. Personal customers and agents have no sub-role
-// today (agent sub-roles are TBD).
-//
-// Vendor has four operational roles sharing one VendorId; type carried here
-// so JWTs from a fully-integrated vendor client parse correctly. Runtime is
-// still blocked at the auth guard until vendor features ship.
-export type CorporateSubRole = 'bookingPerson' | 'admin';
-export type VendorSubRole = 'owner' | 'bookingManager' | 'opsManager' | 'accountsManager';
-
-/** Sub-role attached to an identity. null for roles that don't use one. */
-export type SubRole = CorporateSubRole | VendorSubRole | null;
+// ── No sub-roles ───────────────────────────────────────────────────────────
+// Login and access are decided by the top-level `UserRole` only. There is no
+// sub-role for any role (customer, vendor, driver or uc).

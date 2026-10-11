@@ -12,7 +12,7 @@ import type { RowDataPacket, PoolConnection, ResultSetHeader } from 'mysql2/prom
 import { pool } from '../../../shared/db/pool.js';
 import { withTransaction } from '../../../shared/db/transaction.js';
 import type { AuthSessionRow, SessionDevice } from '../types.js';
-import type { UserRole, SubRole } from '../../../shared/rbac/roles.js';
+import type { UserRole } from '../../../shared/rbac/roles.js';
 
 /** Must match the auth_sessions.revoked_reason ENUM exactly. */
 export type RevokeReason =
@@ -22,7 +22,6 @@ export type CreateSessionInput = {
   jti: string;
   role: UserRole;
   entityId: string;
-  subRole: SubRole;
   refreshTokenHash: string;
   previousJti: string | null;
   /** Nullable per column — see SessionDevice. Login always passes a full DeviceMeta. */
@@ -37,17 +36,18 @@ export async function createSession(
   conn?: PoolConnection,
 ): Promise<void> {
   const runner = conn ?? pool;
+  // sub_role is always written as NULL: the sub-role concept was removed.
+  // The column is kept so the shared DB schema does not need a migration.
   await runner.execute(
     `INSERT INTO auth_sessions
        (jti, role, entity_id, sub_role, refresh_token_hash, previous_jti,
         device_id, device_name, platform, app_version, ip, user_agent,
         issued_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, INET6_ATON(?), ?, NOW(), ?)`,
+     VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, INET6_ATON(?), ?, NOW(), ?)`,
     [
       input.jti,
       input.role,
       input.entityId,
-      input.subRole,
       input.refreshTokenHash,
       input.previousJti,
       input.device.id,
@@ -63,7 +63,7 @@ export async function createSession(
 
 export async function findSessionByJti(jti: string): Promise<AuthSessionRow | null> {
   const [rows] = await pool.execute<RowDataPacket[]>(
-    `SELECT id, jti, role, entity_id, sub_role, refresh_token_hash, previous_jti,
+    `SELECT id, jti, role, entity_id, refresh_token_hash, previous_jti,
             device_id, device_name, platform, app_version, ip, user_agent,
             issued_at, last_used_at, expires_at, revoked_at, revoked_reason
        FROM auth_sessions WHERE jti = ? LIMIT 1`,

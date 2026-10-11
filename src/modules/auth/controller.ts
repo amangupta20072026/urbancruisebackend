@@ -112,7 +112,6 @@ export async function getMe(req: Request, res: Response): Promise<Response> {
   const out = await service.getMe(authDeps, {
     identityUserId: identity.userId,
     identityRole: identity.role,
-    identitySubRole: identity.subRole,
     identityEntityId: identity.entityId,
     identitySessionId: identity.sessionId,
   });

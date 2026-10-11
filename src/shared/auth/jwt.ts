@@ -8,7 +8,7 @@
 import jwt, { type JwtPayload, type SignOptions } from 'jsonwebtoken';
 import { ENV } from '../../config/env.js';
 import { AuthError } from '../errors/index.js';
-import type { UserRole, SubRole } from '../rbac/roles.js';
+import type { UserRole } from '../rbac/roles.js';
 
 // jsonwebtoken's SignOptions.expiresIn is `number | StringValue | undefined`.
 // Non-null-assert the branch we want at the call site so
@@ -18,7 +18,6 @@ type Duration = NonNullable<SignOptions['expiresIn']>;
 export type AccessTokenClaims = JwtPayload & {
   sub: string; // userId
   role: UserRole;
-  subRole: SubRole;
   entityId: string;
   /** Session id — same value as the auth_sessions row's jti. Lets logout
    *  add THIS token to Redis jwt:deny:{sid} for instant revocation. */
@@ -31,8 +30,8 @@ export type RefreshTokenClaims = JwtPayload & {
   /**
    * The mobile number (E.164 without '+', e.g. '919812345678') that logged
    * in to start this session chain. Carried forward on every rotation so
-   * refresh can re-check that the phone still belongs to this account and
-   * re-derive its sub-role (audit fix #11). auth_sessions has no column for
+   * refresh can re-check that the phone still belongs to this account
+   * (audit fix #11). auth_sessions has no column for
    * it, so it lives in the token — which only the server can sign.
    *
    * Optional: tokens issued before this field existed omit it; refresh

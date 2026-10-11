@@ -50,7 +50,6 @@ export const authenticate: RequestHandler = async (req, _res, next) => {
   const identity: Identity = {
     userId: String(claims.sub),
     role: claims.role,
-    subRole: claims.subRole,
     entityId: claims.entityId,
     sessionId: claims.sid,
   };

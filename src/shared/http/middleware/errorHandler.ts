@@ -12,6 +12,9 @@
  *      CLIENT errors → mapped to 400/413/415 AppErrors first (audit fix #15).
  *      Before, malformed JSON surfaced as a 500 SERVER_ERROR and an
  *      error-level "unhandled" log line — paging on-call for client typos.
+ *   7. Headers already sent → log, then destroy the socket (finding L7).
+ *      Never leave the response open; never hand off to Express's default
+ *      handler (it would print a second, unredacted stack to stderr).
  * ==============================================================================
  */
 import type { ErrorRequestHandler } from 'express';
@@ -78,7 +81,11 @@ export const errorHandler: ErrorRequestHandler = (rawErr, req, res, _next) => {
 
   const isOperational = isAppError ? err.isOperational : false;
   const requestId = String(req.id);
-  const logPayload = { err, requestId, statusCode, code };
+  // When headers are already sent, `statusCode` above was never delivered —
+  // record what the client actually received so the log line is not misleading.
+  const logPayload = res.headersSent
+    ? { err, requestId, statusCode, code, headersSent: true, sentStatusCode: res.statusCode }
+    : { err, requestId, statusCode, code };
 
   if (statusCode >= 500 || !isOperational) {
     logger.error(logPayload, 'unhandled request error');
@@ -95,7 +102,20 @@ export const errorHandler: ErrorRequestHandler = (rawErr, req, res, _next) => {
     },
   };
 
-  if (res.headersSent) return; // response already partially written — bail.
+  // L7: response already (partially) written — the status line and headers
+  // are on the wire, so no error envelope can be sent and the response can
+  // never be completed correctly. Destroy the connection so the client sees
+  // a broken response at once (instead of waiting for bytes that will never
+  // come) and the keep-alive socket is never reused with a corrupt frame.
+  //
+  // Done here instead of next(err): Express's final handler performs this
+  // same req.socket.destroy(), but it ALSO console.error()s the raw stack
+  // (express/lib/application.js → logerror) — a second, unstructured,
+  // unredacted copy of an error already logged above.
+  if (res.headersSent) {
+    req.socket.destroy();
+    return;
+  }
 
   // Standard header for 429 responses that carry a hint. Only set when the
   // value is known — spec allows either seconds or an HTTP-date; we always

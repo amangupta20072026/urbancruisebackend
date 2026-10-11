@@ -7,10 +7,13 @@
  *   else generates a UUID v4 via node:crypto.
  * - Custom log level per response: 4xx = warn, 5xx = error, else info.
  * - Slow requests (>1s) get promoted to warn so they surface in dashboards.
+ * - Logs BOTH the client IP (`ip`, via trust proxy) and the socket peer
+ *   (`remoteAddress`, i.e. Nginx) — finding L5.
  * ==============================================================================
  */
 import { pinoHttp } from 'pino-http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Request } from 'express';
 import { HEADER_REQUEST_ID } from '../../config/constants.js';
 import { logger } from './index.js';
 import { redactUrl } from './redactUrl.js';
@@ -48,6 +51,15 @@ export const httpLogger = pinoHttp({
         method: req.method,
         // Never log raw: some paths carry secrets (see redactUrl.ts).
         url: redactUrl(req.url),
+        // L5: `ip` is the real client, resolved by Express from
+        // X-Forwarded-For using `trust proxy` (TRUST_PROXY_HOPS). It must be
+        // read from `req.raw`: pino-http hands this serializer a wrapped copy
+        // whose own `.ip` is always undefined. `raw` is the Express request
+        // because this logger is mounted as Express middleware (app.ts).
+        ip: (req.raw as Request).ip,
+        // Socket peer — the proxy (Nginx) in production. Kept for diagnosing
+        // proxy-chain / TRUST_PROXY_HOPS problems: if `ip` ever equals this
+        // on proxied traffic, the hop count or Nginx's XFF header is wrong.
         remoteAddress: req.remoteAddress,
         userAgent: req.headers?.['user-agent'],
       };

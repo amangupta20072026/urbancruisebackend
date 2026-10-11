@@ -76,11 +76,6 @@ export type OtpDispatchResult = {
 };
 
 /**
- * @deprecated Kept as an alias while callers migrate to `OtpDispatchResult`.
- */
-export type Msg91DispatchResult = OtpDispatchResult;
-
-/**
  * Send `otp` to `mobile` via MSG91 Flow API (transactional SMS route),
  * with a single-attempt retry for transient failures and a Redis-backed
  * circuit breaker on top.

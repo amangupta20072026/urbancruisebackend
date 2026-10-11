@@ -40,12 +40,6 @@ export type ProviderOutcome =
   | 'network' // no response at all — retry once
   | 'unknown'; // any other 4xx we cannot classify — do not retry
 
-/**
- * @deprecated Kept as an alias while callers migrate to `ProviderOutcome`.
- * Remove once no imports of `Msg91Outcome` remain.
- */
-export type Msg91Outcome = ProviderOutcome;
-
 export type ProviderResult = {
   outcome: ProviderOutcome;
   requestId?: string;
@@ -53,9 +47,6 @@ export type ProviderResult = {
   errorCode?: string;
   errorMessage?: string;
 };
-
-/** @deprecated alias — see ProviderOutcome. */
-export type Msg91Result = ProviderResult;
 
 /** Loose shape of MSG91 body — every field optional; we probe via safe reads. */
 type Msg91Body = {

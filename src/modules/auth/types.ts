@@ -7,7 +7,7 @@
  * "normalize" — the repository maps DB → domain and the domain flows out
  * as DTOs (below).
  *
- * The AuthErrorCode enum is the SINGLE SOURCE for the `code` field the RN
+ * The AUTH_ERROR map is the SINGLE SOURCE for the `code` field the RN
  * app switches on (see ApiError.code on the client). Add codes here first,
  * then handle them in the client.
  * ==============================================================================
@@ -22,7 +22,6 @@ export const AUTH_ERROR = {
   ACCOUNT_NOT_PROVISIONED: 'account_not_provisioned',
   ACCOUNT_SUSPENDED: 'account_suspended',
   ACCOUNT_LOCKED: 'account_locked',
-  SIGNUPS_DISABLED: 'signups_disabled',
   CAPTCHA_REQUIRED: 'captcha_required',
   MOBILE_BLOCKED: 'mobile_blocked',
   OTP_SEND_FAILED: 'otp_send_failed',
@@ -35,8 +34,8 @@ export const AUTH_ERROR = {
    *   - MSG91 circuit breaker open (provider had repeated recent failures)
    *
    * Mobile client shows a "try again shortly" screen. This is distinct from
-   * `OTP_SEND_FAILED` (config bug on our side) and `SIGNUPS_DISABLED` (a
-   * business decision) — the code lets ops-side alerting distinguish them.
+   * `OTP_SEND_FAILED` (config bug on our side) — the code lets ops-side
+   * alerting distinguish them.
    */
   SERVICE_UNAVAILABLE: 'service_unavailable',
   SESSION_REVOKED: 'session_revoked',
@@ -54,7 +53,6 @@ export const AUTH_ERROR = {
    *  that verified the OTP. */
   ONBOARDING_INVALID: 'onboarding_invalid',
 } as const;
-export type AuthErrorCode = (typeof AUTH_ERROR)[keyof typeof AUTH_ERROR];
 
 /* ==============================================================================
  * Redis-stored OTP session (JSON in `otp:session:{requestId}`)

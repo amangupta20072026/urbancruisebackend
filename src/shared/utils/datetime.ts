@@ -8,6 +8,3 @@
  */
 
 export const nowIso = (): string => new Date().toISOString();
-
-/** Unix seconds — matches JWT `iat` / `exp` convention. */
-export const nowUnix = (): number => Math.floor(Date.now() / 1000);

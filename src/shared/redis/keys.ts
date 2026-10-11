@@ -41,9 +41,6 @@ export const otpRateMobileDay = (mobile: string): string => `otp:rate:mobile:${m
  *  cooldown (atomic); the stored value is the send time, used for Retry-After. */
 export const otpLastSent = (mobile: string): string => `otp:lastsent:${mobile}`;
 
-/** Rate-limit per source IP (per hour). */
-export const otpRateIpHour = (ip: string): string => `otp:rate:ip:${ip}:1h`;
-
 /** Hourly window per IP subnet (IPv4 /24, IPv6 /64) — a HASH with fields
  *  s (sends), v (verifies), f (provider failures). Catches SMS pumping that
  *  clusters in a small IP range while letting busy carrier-CGNAT ranges

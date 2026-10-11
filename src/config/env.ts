@@ -144,9 +144,6 @@ const schema = z.object({
   JWT_ACCESS_TTL: z.string().regex(durationRegex, 'format: 15m | 1h | 30s | 7d').default('1h'),
   JWT_REFRESH_TTL: z.string().regex(durationRegex, 'format: 15m | 1h | 30s | 7d').default('30d'),
 
-  // ── Bcrypt ──────────────────────────────────────────────────────────────
-  BCRYPT_COST: z.coerce.number().int().min(10).max(15).default(10),
-
   // ── CAPTCHA (hCaptcha) ──────────────────────────────────────────────────
   // After a number trips the OTP brute-force lock, mobile_registry marks it
   // captcha_required_until (+1h). When HCAPTCHA_SECRET is set, /otp/request
@@ -347,5 +344,3 @@ export const ENV = Object.freeze({
   isProd: parsed.data.NODE_ENV === 'production',
   isDev: parsed.data.NODE_ENV === 'development',
 });
-
-export type Env = typeof ENV;

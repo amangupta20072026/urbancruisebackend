@@ -247,10 +247,3 @@ export const MSG91_CB_OPEN_SECONDS = 60;
  * goes unnoticed. 10 s covers network retries and parallel 401 handlers.
  * ============================================================================== */
 export const REFRESH_REUSE_GRACE_SECONDS = 10;
-
-/* ==============================================================================
- * Refresh-session cache
- * ============================================================================== */
-
-/** In-memory cache for auth_sessions row lookups. Disabled at MVP. */
-export const SESSION_CACHE_TTL_SECONDS = 0;

@@ -1,51 +1,34 @@
 /**
- * ==============================================================================
- * config — types
- * ==============================================================================
- * DTOs for /config/app. Keep these serialisable and boring — this endpoint
- * is called by every client at every cold start, so shape stability matters
- * a lot. Add fields, never rename/remove them; when removing, mark deprecated
- * for a full release cycle first.
- * ==============================================================================
+ * config DTOs for GET /config/app. Every client reads this at cold start:
+ * add fields freely, but never rename or remove one without a deprecation
+ * cycle.
  */
 
 export type Platform = 'ios' | 'android';
 
 export type AppConfigVersion = {
-  /** Minimum supported version. Below this, client MUST force-upgrade. */
+  /** Below this the client must force-update. */
   minSupported: string;
-  /** Latest released version. Above the client's current, show soft banner. */
+  /** Below this the client shows a soft update banner. */
   latest: string;
-  /**
-   * Computed per-request: is the caller below `minSupported`?
-   * Always false when `updateUrl` is null (no store page to send them to).
-   */
+  /** Caller is below minSupported. False when updateUrl is null. */
   updateRequired: boolean;
-  /**
-   * Computed per-request: is the caller below `latest`?
-   * Always false when `updateUrl` is null.
-   */
+  /** Caller is below latest. False when updateUrl is null. */
   updateAvailable: boolean;
-  /**
-   * Store page for the caller's platform. Null when the app is not yet
-   * published on that store (see STORE_LINKS in data/app-config.ts).
-   */
+  /** Store page for the caller's platform; null if not published there yet. */
   updateUrl: string | null;
 };
 
 export type AppConfigMaintenance = {
   active: boolean;
-  /** Human-readable message shown on the maintenance screen. */
+  /** Shown on the maintenance screen. */
   message: string | null;
-  /** ISO-8601 timestamp — when we expect to be back. Client shows countdown. */
+  /** Expected end (ISO-8601); the client shows a countdown. */
   estimatedEndAt: string | null;
 };
 
 export type AppConfigFeatureFlags = {
-  /**
-   * Always false. Per-number test mode is reported by POST /auth/otp/request
-   * (`testMode`). Kept so shipped clients that read it still parse.
-   */
+  /** Always false; kept for shipped clients. Use testMode from /auth/otp/request. */
   otpTestMode: boolean;
   referralsEnabled: boolean;
   supportChatEnabled: boolean;
@@ -64,10 +47,7 @@ export type AppConfigLegal = {
   termsVersion: string;
 };
 
-/**
- * Full payload returned by GET /config/app.
- * `version` fields are partly computed per-request against `?appVersion=`.
- */
+/** GET /config/app payload. Some version fields are computed per request. */
 export type AppConfigData = {
   version: AppConfigVersion;
   maintenance: AppConfigMaintenance;
@@ -77,10 +57,7 @@ export type AppConfigData = {
   serviceCities: string[];
 };
 
-/**
- * Input to the service — validated caller context. Kept separate from the
- * response so the loader is easy to swap.
- */
+/** Validated caller context passed to the service. */
 export type AppConfigContext = {
   platform: Platform;
   appVersion: string;

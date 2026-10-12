@@ -1,41 +1,16 @@
 /**
- * ==============================================================================
- * auth.repository — push-token cleanup on sign-out
- * ==============================================================================
- * The `push_tokens` table is owned by the notifications module, which writes
- * it when the app registers for push. Auth only ever DELETES from it, at the
- * moments a device or an account stops being signed in (audit fix #7):
- *
- *   • logout (current device)        → that device's tokens
- *   • logout (all devices)           → every token for the account
- *   • forced revoke (blocked /
- *     suspended / deleted account)   → every token for the account
- *   • refresh-token reuse detected   → every token for the account
- *
- * Without this, a signed-out phone kept receiving the account's booking and
- * payment notifications until FCM itself expired the token.
- *
- * WHY NOT CALL THE NOTIFICATIONS MODULE?
- *   Cross-module imports must go through the target's index.ts
- *   (.depcruiserc.cjs), and notifications/index.ts initialises Firebase on
- *   import — that would make every auth unit test need Firebase credentials.
- *   A single scoped DELETE here keeps the modules decoupled.
- *
- * Matching uses device_id: the app must send the SAME device id to
- * /auth/otp/verify (device.id) and /notifications/tokens (deviceId). If it
- * doesn't, nothing is deleted on single-device logout — the token-claiming
- * upsert in notifications/repository.ts still stops the cross-account leak
- * at the next login on that phone.
- * ==============================================================================
+ * auth repository: deletes push tokens when a device or account is signed
+ * out (logout, logout-all, forced revoke, refresh-token reuse), so it stops
+ * receiving notifications. Notifications owns the table; auth only deletes.
+ * A direct DELETE avoids importing the notifications module, which loads
+ * Firebase on import.
+ * Matching is by device_id, so the app must send the same id to
+ * /auth/otp/verify and /notifications/tokens.
  */
 import { pool } from '../../../shared/db/pool.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
 
-/**
- * Delete push tokens for one account. `deviceId` null = every device.
- * Always scoped by (role, entity_id), so it can only touch the caller's own
- * rows.
- */
+/** Deletes an account's tokens, scoped by (role, entity_id). deviceId null means all devices. */
 export async function deletePushTokens(
   role: UserRole,
   entityId: string,

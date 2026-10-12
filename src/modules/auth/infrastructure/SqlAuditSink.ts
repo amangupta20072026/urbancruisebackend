@@ -1,14 +1,4 @@
-/**
- * ==============================================================================
- * SqlAuditSink — production IAuditSink (synchronous MySQL INSERT)
- * ==============================================================================
- * Non-throwing: every internal error is caught, logged, and swallowed.
- * The caller (audit helper) must not need a try/catch around record().
- *
- * FUTURE SWAP: to move audit events to a BullMQ queue, implement
- * QueueAuditSink and swap in AuthContainer — no service code changes.
- * ==============================================================================
- */
+/** IAuditSink that inserts into otp_events. Never throws: errors are logged and dropped. */
 
 import type { IAuditSink, AuditEventInput } from '../ports/IAuditSink.js';
 import type { IAuthRepository } from '../ports/IAuthRepository.js';

@@ -1,29 +1,8 @@
 /**
- * ==============================================================================
- * AuthContainer — dependency wiring for the auth module
- * ==============================================================================
- * Creates and connects the production implementations of every auth port:
- *
- *   IAuthRepository   →  MysqlAuthRepository
- *   IOtpSessionStore  →  RedisOtpSessionStore
- *   IAuditSink        →  SqlAuditSink (wraps MysqlAuthRepository)
- *   ICaptchaVerifier  →  HCaptchaVerifier when HCAPTCHA_SECRET is set,
- *                        otherwise DisabledCaptchaVerifier (gate off)
- *
- * Plus the enabled-roles set (fix H2) — ENABLED_ROLE_SET by default.
- *
- * Then assembles the AuthServiceDeps bundle that every service function
- * receives instead of importing concrete singletons directly.
- *
- * SINGLE INSTANTIATION: `authDeps` is created once at module load and
- * exported as a frozen object. It behaves like a singleton but is mockable
- * at test time because it's injected, not imported directly by service files.
- *
- * TEST OVERRIDE: tests call `buildAuthDeps({ repo, store, audit })` with
- * in-memory fakes and pass the result directly to service functions.
- * Production code imports `authDeps` and passes it through.
- *
- * ==============================================================================
+ * Wires the auth dependencies: MySQL repository, Redis store, SQL audit sink,
+ * hCaptcha verifier (disabled when HCAPTCHA_SECRET is unset) and the enabled
+ * roles. Production passes authDeps to every service call; tests build their
+ * own with buildAuthDeps({ ...fakes }).
  */
 
 import { MysqlAuthRepository } from './MysqlAuthRepository.js';
@@ -38,23 +17,17 @@ import type { IOtpSessionStore } from '../ports/IOtpSessionStore.js';
 import type { IAuditSink } from '../ports/IAuditSink.js';
 import type { ICaptchaVerifier } from '../ports/ICaptchaVerifier.js';
 
-/**
- * The complete set of dependencies injected into every auth service function.
- * Service files accept this type; callers (controller → service) pass authDeps.
- */
+/** Dependencies passed to every auth service function. */
 export type AuthServiceDeps = {
   readonly repo: IAuthRepository;
   readonly store: IOtpSessionStore;
   readonly audit: IAuditSink;
   readonly captcha: ICaptchaVerifier;
-  /** Roles allowed to request OTPs, log in and refresh (fix H2). */
+  /** Roles allowed to request OTPs, log in and refresh. */
   readonly enabledRoles: ReadonlySet<UserRole>;
 };
 
-/**
- * Build an AuthServiceDeps from explicit implementations.
- * Used both here (production) and in tests (with in-memory fakes).
- */
+/** Builds deps, defaulting each missing one to the production implementation. */
 export function buildAuthDeps(overrides: {
   repo?: IAuthRepository;
   store?: IOtpSessionStore;
@@ -74,11 +47,5 @@ export function buildAuthDeps(overrides: {
   return Object.freeze({ repo, store, audit, captcha, enabledRoles });
 }
 
-/**
- * Production singleton — imported by the auth module's service index and
- * passed down to every service function.
- *
- * Not constructed at import time of individual service files — only when this
- * module is imported, which happens once at app startup via auth/index.ts.
- */
+/** Production deps, created once when this module is first imported. */
 export const authDeps: AuthServiceDeps = buildAuthDeps({});

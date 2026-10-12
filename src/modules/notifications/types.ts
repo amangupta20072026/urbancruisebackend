@@ -1,20 +1,11 @@
 /**
- * ==============================================================================
- * notifications — types (DB rows + DTOs)
- * ==============================================================================
- * Row types map directly to DB column names (snake_case).
- * DTOs are what the API returns to the client (camelCase, no DB internals).
- *
- * `NotificationKind` and `NotificationCategory` are shared with the frontend's
- * src/features/shared/notifications/types.ts — keep them in sync manually
- * when adding new kinds.
- * ==============================================================================
+ * notifications types. Rows use DB column names; DTOs are what the API returns.
+ * NotificationKind and NotificationCategory must match the app's
+ * src/features/shared/notifications/types.ts.
  */
 import type { UserRole } from '../../shared/rbac/roles.js';
 
-/* --------------------------------------------------------------------------
- * DB Row — push_tokens
- * -------------------------------------------------------------------------- */
+/* push_tokens row */
 
 export type PushTokenRow = {
   id: number;
@@ -29,9 +20,7 @@ export type PushTokenRow = {
   updated_at: Date;
 };
 
-/* --------------------------------------------------------------------------
- * DB Row — notifications
- * -------------------------------------------------------------------------- */
+/* notifications row */
 
 export type NotificationCategory = 'quote' | 'booking' | 'payment' | 'general';
 
@@ -54,16 +43,14 @@ export type NotificationRow = {
   category: NotificationCategory;
   title: string;
   body: string;
-  /** JSON DeepLinkTarget or null */
+  /** DeepLinkTarget JSON, or null. */
   payload: Record<string, unknown> | null;
   fcm_message_id: string | null;
   read_at: Date | null;
   created_at: Date;
 };
 
-/* --------------------------------------------------------------------------
- * DTOs — returned to client
- * -------------------------------------------------------------------------- */
+/* Response DTOs */
 
 export type NotificationDto = {
   id: string; // uuid
@@ -71,7 +58,7 @@ export type NotificationDto = {
   category: NotificationCategory;
   title: string;
   body: string;
-  /** Serialized DeepLinkTarget for the frontend's resolveFcmClick. Null means no tap action. */
+  /** DeepLinkTarget for the app's resolveFcmClick(); null means no tap action. */
   payload: Record<string, unknown> | null;
   unread: boolean;
   timestamp: string; // ISO 8601
@@ -83,9 +70,7 @@ export type NotificationListDto = {
   unreadCount: number;
 };
 
-/* --------------------------------------------------------------------------
- * Internal — payload shape for createNotification (called from other modules)
- * -------------------------------------------------------------------------- */
+/* Input for sendNotification (used by other modules) */
 
 export type CreateNotificationInput = {
   role: UserRole;
@@ -94,21 +79,15 @@ export type CreateNotificationInput = {
   category: NotificationCategory;
   title: string;
   body: string;
-  /**
-   * A DeepLinkTarget object (discriminated union from the deeplink catalog).
-   * e.g. { kind: 'customer.bookingDetail', bookingId: 'BKG-123' }
-   * The client passes this through resolveFcmClick() on tap.
-   */
+  /** DeepLinkTarget opened on tap, e.g. { kind: 'customer.bookingDetail', bookingId: '…' }. */
   payload?: Record<string, unknown>;
 };
 
-/* --------------------------------------------------------------------------
- * Push dispatch result — returned from the FCM send layer
- * -------------------------------------------------------------------------- */
+/* Push dispatch result */
 
 export type PushDispatchResult = {
   /** Number of tokens that accepted the message. */
   successCount: number;
-  /** Tokens that failed and should be pruned from push_tokens. */
+  /** Invalid tokens to delete from push_tokens. */
   tokensToDelete: string[];
 };

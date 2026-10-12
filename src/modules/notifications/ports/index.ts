@@ -1,4 +1,2 @@
-/**
- * notifications ports — barrel
- */
+/** notifications ports. */
 export type { IPushDispatcher, PushDispatchParams } from './IPushDispatcher.js';

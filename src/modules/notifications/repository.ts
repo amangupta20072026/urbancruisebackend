@@ -1,14 +1,6 @@
 /**
- * ==============================================================================
- * notifications — repository (SQL only)
- * ==============================================================================
- * EVERY query scopes by (role, entity_id) to enforce tenant isolation.
- * Prepared statements (pool.execute) prevent SQL injection.
- *
- * mysql2 pool.execute<T> requires T to extend RowDataPacket | ResultSetHeader
- * etc. Row types are intersected with RowDataPacket (the pattern used in
- * src/modules/auth/repository.ts throughout this codebase).
- * ==============================================================================
+ * notifications repository. Every query is scoped by (role, entity_id).
+ * Row types intersect RowDataPacket, as pool.execute<T> requires.
  */
 import type { RowDataPacket, ResultSetHeader } from 'mysql2/promise';
 import { pool } from '../../shared/db/pool.js';
@@ -21,27 +13,13 @@ import type {
   CreateNotificationInput,
 } from './types.js';
 
-/* ==========================================================================
- * push_tokens
- * ========================================================================== */
+/* push_tokens */
 
 /**
- * Upsert an FCM token for a (role, entity_id, device_id) triple.
- * ON DUPLICATE KEY UPDATE keeps the latest token and timestamp.
- * Per Firebase's token management guide:
- *   https://firebase.google.com/docs/cloud-messaging/manage-tokens
- *
- * TOKEN OWNERSHIP (security fix — audit item #7):
- *   An FCM token identifies ONE app install, and it does not change when a
- *   different person logs in on that phone. Previously, if user A logged out
- *   (or the logout never reached us) and user B logged in on the same phone,
- *   both A's and B's rows pointed at the same token — so B's phone kept
- *   receiving A's booking and payment notifications.
- *
- *   Registration now CLAIMS the token: in the same transaction, every other
- *   row holding this token (another account, or this account under an older
- *   device_id) is deleted before the upsert. A token can therefore belong to
- *   exactly one (role, entity_id, device_id) at a time — the latest login.
+ * Upserts the token for (role, entity_id, device_id) and claims it: in the
+ * same transaction, any other row holding this token is deleted. A token
+ * identifies one app install, so this stops a phone receiving a previous
+ * account's notifications after a new login.
  */
 export async function upsertPushToken(params: {
   role: UserRole;
@@ -82,10 +60,7 @@ export async function upsertPushToken(params: {
   });
 }
 
-/**
- * Hard-delete a token by (role, entity_id, device_id).
- * Called on logout — after this, FCM will not push to this device for this user.
- */
+/** Deletes the token for (role, entity_id, device_id). Used on logout. */
 export async function deletePushToken(params: {
   role: UserRole;
   entityId: number;
@@ -98,10 +73,7 @@ export async function deletePushToken(params: {
   );
 }
 
-/**
- * Load all FCM tokens for a given (role, entity_id).
- * Used by the push-dispatch layer to fan out to all active devices.
- */
+/** All tokens for (role, entity_id), one per device. */
 type PushTokenDbRow = RowDataPacket & PushTokenRow;
 
 export async function getTokensForEntity(params: {
@@ -115,13 +87,7 @@ export async function getTokensForEntity(params: {
   return rows;
 }
 
-/**
- * Bulk-delete stale/invalid FCM tokens by their token string.
- * Called after FCM returns messaging/registration-token-not-registered.
- * Per: https://firebase.google.com/docs/cloud-messaging/manage-tokens#detect-invalid-token-responses
- *
- * Chunked at 100 tokens per call to stay within MySQL's IN() limits.
- */
+/** Deletes tokens FCM reported as invalid, 100 per query. */
 export async function deleteStalePushTokens(fcmTokens: string[]): Promise<void> {
   if (fcmTokens.length === 0) return;
   const CHUNK = 100;
@@ -132,13 +98,9 @@ export async function deleteStalePushTokens(fcmTokens: string[]): Promise<void> 
   }
 }
 
-/* ==========================================================================
- * notifications inbox
- * ========================================================================== */
+/* notifications inbox */
 
-/**
- * Insert one notification row and return its uuid.
- */
+/** Inserts a notification and returns its uuid. */
 export async function insertNotification(input: CreateNotificationInput): Promise<string> {
   const payloadJson = input.payload ? JSON.stringify(input.payload) : null;
 
@@ -159,9 +121,7 @@ export async function insertNotification(input: CreateNotificationInput): Promis
   return first.uuid;
 }
 
-/**
- * Back-fill the FCM message ID after a successful send. Best-effort.
- */
+/** Stores the FCM message id after a send. Best-effort. */
 export async function updateNotificationFcmId(params: {
   uuid: string;
   fcmMessageId: string;
@@ -172,13 +132,9 @@ export async function updateNotificationFcmId(params: {
   ]);
 }
 
-/**
- * List notifications for a user, newest first, with optional filters.
- */
+/** Inbox page, newest first, with optional category and unread filters. */
 type NotificationDbRow = RowDataPacket & NotificationRow;
-// COUNT(*) is a BIGINT, and the shared pool runs with bigNumberStrings: true
-// (shared/db/pool.ts), so mysql2 returns these as STRINGS. Typed as such
-// and converted with Number() below — a count never exceeds 2^53.
+// COUNT(*) comes back as a string (pool uses bigNumberStrings); safe to Number().
 type CountRow = RowDataPacket & { total: string | number };
 type UnreadCountRow = RowDataPacket & { unread_count: string | number };
 
@@ -215,7 +171,7 @@ export async function listNotifications(params: {
     args,
   );
 
-  // Unread count scoped to entity, optionally filtered by category
+  // Unread count respects category but not the unread filter or paging.
   const unreadConditions = ['role = ?', 'entity_id = ?', 'read_at IS NULL'];
   const unreadArgs: (string | number | boolean | null)[] = [params.role, params.entityId];
   if (params.category !== undefined) {
@@ -235,10 +191,7 @@ export async function listNotifications(params: {
   };
 }
 
-/**
- * Mark a single notification as read. Scoped to (role, entity_id).
- * Returns true if the row was updated (was unread and owned by this entity).
- */
+/** Marks one notification read. True if an unread row owned by this entity was updated. */
 export async function markNotificationRead(params: {
   uuid: string;
   role: UserRole;
@@ -253,9 +206,7 @@ export async function markNotificationRead(params: {
   return result.affectedRows > 0;
 }
 
-/**
- * Mark ALL unread notifications as read for an entity.
- */
+/** Marks all of an entity's notifications read. */
 export async function markAllNotificationsRead(params: {
   role: UserRole;
   entityId: number;

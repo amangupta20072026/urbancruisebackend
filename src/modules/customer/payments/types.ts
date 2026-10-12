@@ -1,19 +1,11 @@
 /**
- * ==============================================================================
- * customer.payments — types
- * ==============================================================================
- * DB source: `dsrs` table — payment columns within the booking record.
- *
- * IMPORTANT COLUMN MAPPING:
- *   dsrs.id        → INT PK  (internal, never exposed as PaymentId)
- *   dsrs.bookingId → VARCHAR (this IS the PaymentId the app uses, e.g. "pay_00110_1")
- *   dsrs.full_name → customer name on the booking
- *   dsrs.payment_status → free-text ("Paid", "paid", "Partial", "Pending", etc.)
- * ==============================================================================
+ * customer.payments types. Payments live on the `dsrs` booking row.
+ * The app's payment id is dsrs.bookingId (e.g. "pay_00110_1"); the INT
+ * dsrs.id is internal. dsrs.payment_status is free text.
  */
 import type { RowDataPacket } from 'mysql2/promise';
 
-/** Raw DB row from dsrs */
+/** Raw dsrs row. */
 export type PaymentRow = RowDataPacket & {
   id: number;
   customer_id: number | null;
@@ -32,9 +24,9 @@ export type PaymentRow = RowDataPacket & {
   created_at: Date;
 };
 
-/** DTO for the payment list tab */
+/** Payment list item. */
 export type CustomerPaymentListItem = {
-  /** bookingId varchar if present, else string(id) */
+  /** bookingId when present, otherwise the numeric id as a string. */
   id: string;
   bookingId: string | null;
   date: string | null;
@@ -46,7 +38,7 @@ export type CustomerPaymentListItem = {
   createdAt: string;
 };
 
-/** DTO for the payment detail sheet + receipt generation */
+/** Payment detail, also used to build the receipt. */
 export type CustomerPaymentDetail = CustomerPaymentListItem & {
   customerName: string | null;
   driverName: string | null;

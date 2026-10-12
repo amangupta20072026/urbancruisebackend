@@ -1,16 +1,4 @@
-/**
- * ==============================================================================
- * auth.repository — driver user resolution + profile loading
- * ==============================================================================
- * Handles the `drivers` table:
- *   • findDriverByPhone        — phone lookup
- *   • loadDriverProfile        — profile DTO for /verify response
- *   • loadDriverIdentityDetails — profile + requiresProfileSetup for /me
- *                                 returns null when the row has vanished
- *
- * NOTE: `drivers` has no `status` column — status is always 'active'.
- * ==============================================================================
- */
+/** auth repository: drivers. No status column; a missing row or blocked phone means no access. */
 import type { RowDataPacket } from 'mysql2/promise';
 import { pool } from '../../../shared/db/pool.js';
 import { isRawPhoneAdminBlocked } from './mobile-registry.js';
@@ -23,9 +11,7 @@ import {
   placeholder,
 } from './users-shared.js';
 
-/* --------------------------------------------------------------------------
- * DB row shape
- * -------------------------------------------------------------------------- */
+/* DB row */
 type DriverRow = RowDataPacket & {
   id: number;
   phone: string | null;
@@ -35,12 +21,9 @@ type DriverRow = RowDataPacket & {
   created_at: Date | null;
 };
 
-/* --------------------------------------------------------------------------
- * Phone lookup
- * -------------------------------------------------------------------------- */
+/* Phone lookup */
 export async function findDriverByPhone(mobile: string): Promise<ResolvedUser | null> {
   const fmts = candidateFormats(mobile);
-  // NOTE: `drivers` table has no `status` column.
   const [rows] = await pool.execute<DriverRow[]>(
     `SELECT id, phone
        FROM drivers
@@ -60,10 +43,7 @@ export async function findDriverByPhone(mobile: string): Promise<ResolvedUser | 
   };
 }
 
-/* --------------------------------------------------------------------------
- * Status by id — `drivers` has no status column, so: missing ⇒ null,
- * phone admin-blocked in mobile_registry ⇒ 'inactive', otherwise 'active'.
- * -------------------------------------------------------------------------- */
+/* Status by id: null if missing, 'inactive' if the phone is admin-blocked, else 'active'. */
 export async function getDriverStatusById(id: string): Promise<ResolvedUser['status'] | null> {
   const [rows] = await pool.execute<RowDataPacket[]>(
     'SELECT id, phone FROM drivers WHERE id = ? LIMIT 1',
@@ -74,9 +54,7 @@ export async function getDriverStatusById(id: string): Promise<ResolvedUser['sta
   return blocked ? 'inactive' : 'active';
 }
 
-/* --------------------------------------------------------------------------
- * Profile loaders
- * -------------------------------------------------------------------------- */
+/* Profile loaders */
 export async function loadDriverProfile(id: string): Promise<UserProfileDto> {
   const [rows] = await pool.execute<DriverRow[]>(
     `SELECT id, phone, first_name, last_name, email, created_at

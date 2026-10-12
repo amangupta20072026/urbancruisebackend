@@ -1,16 +1,4 @@
-/**
- * ==============================================================================
- * notifications.service — inbox management
- * ==============================================================================
- * Owns the read-side of the `notifications` table:
- *   listNotifications    — paginated inbox with optional category + unread filters.
- *   markNotificationRead — mark one notification row as read (scoped by entity).
- *   markAllRead          — bulk-mark all unread rows as read for an entity.
- *
- * SRP: this file knows only about inbox state. It has no knowledge of token
- * lifecycle, push dispatch, or the mechanics of persisting a new notification.
- * ==============================================================================
- */
+/** Inbox read side: list, mark one read, mark all read. Scoped by role + entity. */
 import * as repo from './repository.js';
 import type { UserRole } from '../../shared/rbac/roles.js';
 import type { NotificationDto, NotificationListDto, NotificationRow } from './types.js';
@@ -43,9 +31,6 @@ export async function markAllRead(params: { role: UserRole; entityId: number }):
   await repo.markAllNotificationsRead(params);
 }
 
-/* --------------------------------------------------------------------------
- * Local helper — NotificationRow → NotificationDto projection
- * -------------------------------------------------------------------------- */
 function rowToDto(row: NotificationRow): NotificationDto {
   return {
     id: row.uuid,

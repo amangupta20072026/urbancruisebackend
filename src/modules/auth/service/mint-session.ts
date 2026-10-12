@@ -1,14 +1,7 @@
 /**
- * ==============================================================================
- * auth.service — mintAuthenticatedSession
- * ==============================================================================
- * The ONE place a login session is created. Used by:
- *   • verifyOtp            — existing user, OTP correct
- *   • completeOnboarding   — new customer, onboarding form submitted
- *
- * Steps: sign tokens → insert auth_sessions row → index active session →
- *        load profile → login_events row → response DTO.
- * ==============================================================================
+ * The only place a login session is created (verifyOtp and onboarding):
+ * signs tokens, stores the session, indexes it, loads the profile and
+ * records the login.
  */
 import { ENV } from '../../../config/env.js';
 import { newId } from '../../../shared/utils/id.js';
@@ -33,8 +26,7 @@ export async function mintAuthenticatedSession(
   const { store, repo } = deps;
 
   const jti = newId();
-  // `mob` binds the session chain to the phone that logged in — refresh
-  // re-checks it (see session.ts → refreshSession, audit fix #11).
+  // `mob` ties the session to the login phone; refresh re-checks it.
   const refresh = signRefreshToken({ sub: user.userId, jti, mob: ctx.mobile });
   const access = signAccessToken({
     sub: user.userId,
@@ -43,7 +35,7 @@ export async function mintAuthenticatedSession(
     sid: jti,
   });
 
-  // One value for the DB row AND the Redis index, so they always agree.
+  // Same expiry for the DB row and the Redis index.
   const expiresAt = expiryFromTtl(ENV.JWT_REFRESH_TTL);
   await repo.createSession({
     jti,

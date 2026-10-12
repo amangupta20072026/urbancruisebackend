@@ -1,21 +1,7 @@
 /**
- * ==============================================================================
- * FirebasePushDispatcher — production IPushDispatcher backed by Firebase Admin
- * ==============================================================================
- * Wraps the `getMessaging()` singleton from shared/providers/firebase/admin.ts.
- * All FCM-specific details (MulticastMessage shape, chunk size, stale-token
- * error codes, apns/android platform options) live here — the service layer
- * knows nothing about FCM.
- *
- * CHUNKING: FCM's sendEachForMulticast accepts up to 500 tokens per call.
- * We chunk at 500 and aggregate results across chunks.
- *
- * STALE TOKEN DETECTION: per Firebase docs:
- *   https://firebase.google.com/docs/cloud-messaging/manage-tokens#detect-invalid-token-responses
- *
- * NON-THROWING: any error from the FCM SDK is caught, logged, and returned
- * as a zero-success result so the caller's inbox write is never blocked.
- * ==============================================================================
+ * IPushDispatcher backed by Firebase Admin (FCM). Sends in chunks of 500
+ * (the sendEachForMulticast limit) and reports permanently invalid tokens
+ * for pruning. Never throws: SDK errors are logged and returned as zero success.
  */
 import type { IPushDispatcher, PushDispatchParams } from '../ports/IPushDispatcher.js';
 import type { PushDispatchResult } from '../types.js';
@@ -23,7 +9,7 @@ import type { MulticastMessage, BatchResponse } from 'firebase-admin/messaging';
 import { getMessaging } from '../../../shared/providers/firebase/admin.js';
 import { logger } from '../../../shared/logger/index.js';
 
-/** FCM error codes that indicate a token is permanently invalid. */
+/** FCM error codes meaning the token is permanently invalid. */
 const STALE_TOKEN_CODES = new Set([
   'messaging/registration-token-not-registered',
   'messaging/invalid-registration-token',
@@ -42,20 +28,9 @@ export class FirebasePushDispatcher implements IPushDispatcher {
       for (let i = 0; i < params.tokens.length; i += CHUNK_SIZE) {
         const chunk = params.tokens.slice(i, i + CHUNK_SIZE);
 
-        /**
-         * MulticastMessage shape for sendEachForMulticast (HTTP v1 API).
-         *
-         * `data` values must all be strings — FCM wire format requirement.
-         * `click` carries the JSON-serialized DeepLinkTarget so the client's
-         * resolveFcmClick() can parse it on tap.
-         *
-         * android.priority 'high' wakes the background handler for data-only
-         * messages. For notification+data messages the OS already shows the
-         * notification, but high priority is correct for transactional content.
-         *
-         * apns.payload.aps.contentAvailable true is the iOS equivalent for
-         * data-only background wakeup; harmless for notification+data.
-         */
+        // FCM data values must be strings; `click` is the deep-link JSON.
+        // High priority (Android) and contentAvailable (iOS) suit
+        // transactional messages and wake the app's background handler.
         const message: MulticastMessage = {
           tokens: chunk,
           notification: {

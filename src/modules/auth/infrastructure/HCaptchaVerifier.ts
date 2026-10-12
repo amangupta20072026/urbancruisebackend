@@ -1,18 +1,8 @@
 /**
- * ==============================================================================
- * HCaptchaVerifier — ICaptchaVerifier backed by hCaptcha siteverify
- * ==============================================================================
- * API: POST https://api.hcaptcha.com/siteverify  (application/x-www-form-urlencoded)
- *   secret    — HCAPTCHA_SECRET
- *   response  — the token the app obtained from the hCaptcha widget
- *   remoteip  — optional, the client IP
- *   sitekey   — optional; when sent, tokens for any other site key fail
- * Reply: { success: boolean, "error-codes"?: string[], ... }
- * Tokens are single-use: hCaptcha itself rejects a replayed token.
- *
- * Never throws. A timeout / network error / malformed reply is reported as
- * `unavailable`, and the caller decides (sendOtp fails CLOSED — see there).
- * ==============================================================================
+ * ICaptchaVerifier using hCaptcha siteverify. Sends the secret, token,
+ * client IP and (optionally) the site key. hCaptcha rejects replayed tokens.
+ * Never throws: timeouts, network errors and bad replies return
+ * 'unavailable', and sendOtp then fails closed.
  */
 import axios from 'axios';
 import type { CaptchaVerdict, ICaptchaVerifier } from '../ports/ICaptchaVerifier.js';
@@ -20,7 +10,7 @@ import type { CaptchaVerdict, ICaptchaVerifier } from '../ports/ICaptchaVerifier
 const SITEVERIFY_URL = 'https://api.hcaptcha.com/siteverify';
 const TIMEOUT_MS = 5_000;
 
-/** Minimal HTTP seam so the class is unit-testable without network access. */
+/** HTTP seam so tests can run without the network. */
 export type FormPoster = (url: string, form: URLSearchParams) => Promise<unknown>;
 
 const axiosPoster: FormPoster = async (url, form) => {
@@ -64,12 +54,12 @@ export class HCaptchaVerifier implements ICaptchaVerifier {
   }
 }
 
-/** Gate OFF — used when HCAPTCHA_SECRET is not configured. */
+/** Used when HCAPTCHA_SECRET is not set (gate off). */
 export class DisabledCaptchaVerifier implements ICaptchaVerifier {
   readonly enabled = false;
 
   async verify(): Promise<CaptchaVerdict> {
-    // Never consulted while disabled (sendOtp checks `enabled` first).
+    // Unreachable: sendOtp checks `enabled` first.
     return { ok: true };
   }
 }

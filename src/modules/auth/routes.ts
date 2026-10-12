@@ -1,25 +1,13 @@
 /**
- * ==============================================================================
- * auth — routes
- * ==============================================================================
- * Public paths (no auth middleware):
- *   POST /auth/otp/request   — send OTP
- *   POST /auth/otp/verify    — verify OTP → mint session
- *   POST /auth/refresh       — rotate tokens
- *   POST /auth/customer/onboard — NEW customer: submit details → account + session
- *                                 (authorised by the single-use onboarding token
- *                                 that /otp/verify returns)
- *
- * Protected paths (behind `authenticate`):
- *   GET  /auth/me            — server-authoritative identity for the session
- *   POST /auth/logout        — revoke current or all sessions
- *
- * NOTE on rate-limit stacking: the global rate limit runs first (in app.ts).
- * The stricter per-endpoint limiters added here layer on top — matches what
- * the failure matrix asks for on the auth surface. All of them are
- * Redis-backed via createRateLimiter(), so the limits hold across every PM2
- * worker (audit fix #5 — they used to be per-process).
- * ==============================================================================
+ * auth routes, mounted at /api/v1/auth.
+ *   POST /otp/request        send OTP                       (public)
+ *   POST /otp/verify         verify OTP, start session      (public)
+ *   POST /customer/onboard   create new customer + session  (public, onboarding token)
+ *   POST /refresh            rotate tokens                  (public)
+ *   GET  /me                 current identity               (authenticated)
+ *   POST /logout             revoke this or all sessions    (authenticated)
+ * Limiters here stack on the global one and are Redis-backed, so they hold
+ * across PM2 workers.
  */
 import { Router } from 'express';
 import { validate } from '../../shared/http/middleware/validate.js';
@@ -44,24 +32,17 @@ import {
 
 const router = Router();
 
-/**
- * Stricter limiter for the OTP surface — the global one is too permissive
- * for an endpoint that costs money per call.
- */
+/** OTP limiter: each send costs money, so stricter than the global limit. */
 const otpLimiter = createRateLimiter({
   name: 'auth-otp',
   windowMs: 15 * 60 * 1000,
   limit: ENV.RATE_LIMIT_AUTH_MAX,
   message: 'Too many requests. Please wait and try again.',
-  // Key by IP + phone-in-body — an attacker who rotates IP but hammers one
-  // number still trips the limiter. Redis-backed per-mobile limits inside
-  // the service catch phone-only enumeration.
-  // NOTE: clientIpKey() groups IPv6 by /64 (IPV6_RATE_LIMIT_SUBNET), so
-  // IPv6 users can't bypass the limit by rotating the interface identifier.
+  // Keyed by IP (IPv6 grouped by /64) + phone. The service has its own
+  // per-mobile limits for attackers that rotate IPs.
   keyGenerator: req => {
     const ipKey = clientIpKey(req);
-    // Runs BEFORE validate(), so `phone` is raw client input. Cap its length:
-    // it becomes part of a Redis key, and a real phone is 10 digits.
+    // Runs before validate(): cap the raw phone, it becomes part of a Redis key.
     const phone = String((req.body as { phone?: unknown })?.phone ?? '').slice(0, 16);
     return `${ipKey}:${phone}`;
   },
@@ -71,8 +52,7 @@ router.post('/otp/request', otpLimiter, validate({ body: RequestOtpBody }), post
 
 router.post('/otp/verify', otpLimiter, validate({ body: VerifyOtpBody }), postVerifyOtp);
 
-/** Onboarding: keyed by IP only (no phone in the body). The ticket itself is
- *  single-use, so this limiter only guards against token-guessing floods. */
+/** Onboarding limiter, by IP. Tickets are single-use; this stops token-guessing floods. */
 const onboardLimiter = createRateLimiter({
   name: 'auth-onboard',
   windowMs: 15 * 60 * 1000,

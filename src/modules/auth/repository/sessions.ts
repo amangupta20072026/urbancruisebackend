@@ -1,13 +1,4 @@
-/**
- * ==============================================================================
- * auth.repository — auth_sessions
- * ==============================================================================
- * Refresh-token session rows: create, look up, revoke, rotate.
- *
- * `rotateSession` runs in one DB transaction so we never end up with two
- * concurrently-active sessions or a hole where neither is active.
- * ==============================================================================
- */
+/** auth repository: auth_sessions (create, find, revoke, rotate). */
 import type { RowDataPacket, PoolConnection, ResultSetHeader } from 'mysql2/promise';
 import { pool } from '../../../shared/db/pool.js';
 import { withTransaction } from '../../../shared/db/transaction.js';
@@ -24,7 +15,7 @@ export type CreateSessionInput = {
   entityId: string;
   refreshTokenHash: string;
   previousJti: string | null;
-  /** Nullable per column — see SessionDevice. Login always passes a full DeviceMeta. */
+  /** Nullable on refresh (see SessionDevice); login always passes a full device. */
   device: SessionDevice;
   ip: string | null;
   userAgent: string | null;
@@ -36,8 +27,7 @@ export async function createSession(
   conn?: PoolConnection,
 ): Promise<void> {
   const runner = conn ?? pool;
-  // sub_role is always written as NULL: the sub-role concept was removed.
-  // The column is kept so the shared DB schema does not need a migration.
+  // sub_role is legacy; always NULL.
   await runner.execute(
     `INSERT INTO auth_sessions
        (jti, role, entity_id, sub_role, refresh_token_hash, previous_jti,
@@ -101,17 +91,9 @@ export async function revokeAllForEntity(
 }
 
 /**
- * Is `oldJti` a benign duplicate refresh? (fix M2)
- *
- * True only when ALL of these hold:
- *   • the row was revoked by a normal refresh (revoked_reason = 'rotation'),
- *   • at most `graceSeconds` ago — measured with the DATABASE clock (NOW()),
- *     so clock drift between app servers cannot widen or shrink the window,
- *   • a replacement session created from it (previous_jti = oldJti, same
- *     account) is still active — so a token whose replacement was logged
- *     out or force-revoked never gets a new session.
- *
- * The join is scoped by (role, entity_id), which uses idx_auth_sessions_entity.
+ * True if oldJti looks like a duplicate refresh, not theft: it was revoked by
+ * rotation within graceSeconds (DB clock, so server drift doesn't matter)
+ * and its replacement session is still active.
  */
 export async function isWithinRotationGrace(
   oldJti: string,
@@ -134,17 +116,11 @@ export async function isWithinRotationGrace(
   return rows.length > 0;
 }
 
-/**
- * Rotation is one transaction:
- *   1. mark oldJti revoked (rotation)
- *   2. insert new session with previous_jti = oldJti
- * Both must succeed together — otherwise we risk two active sessions or none.
- */
+/** Revokes oldJti and inserts its replacement in one transaction. */
 export async function rotateSession(oldJti: string, next: CreateSessionInput): Promise<boolean> {
   return withTransaction(async conn => {
-    // Conditional revoke: only ONE concurrent refresh with the same token can
-    // flip revoked_at. The loser gets affectedRows=0 and creates nothing, so a
-    // session can never fork into two valid refresh chains.
+    // Only one concurrent refresh can revoke it; the other creates nothing,
+    // so a session can't fork into two refresh chains.
     const [res] = await conn.execute<ResultSetHeader>(
       `UPDATE auth_sessions SET revoked_at = NOW(), revoked_reason = 'rotation'
         WHERE jti = ? AND revoked_at IS NULL`,

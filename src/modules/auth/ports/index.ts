@@ -1,11 +1,4 @@
-/**
- * ==============================================================================
- * auth ports — barrel
- * ==============================================================================
- * Re-exports every port (interface) and shared input type defined in this
- * directory. Service files and infrastructure files import from here.
- * ==============================================================================
- */
+/** auth ports. */
 
 export type { IOtpSessionStore, IdempotencySnapshot } from './IOtpSessionStore.js';
 export type {

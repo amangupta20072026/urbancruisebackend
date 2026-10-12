@@ -1,17 +1,4 @@
-/**
- * ==============================================================================
- * auth — controller (HTTP glue only)
- * ==============================================================================
- * NO business logic. Reads validated req.body / req.headers, calls the service
- * with the production deps bundle, writes the response envelope. Errors bubble
- * up to shared errorHandler.
- *
- * DESIGN CHANGE (DIP fix):
- *   Controllers import `authDeps` (the production singleton) and pass it as
- *   the first argument to every service function. Nothing else in this file
- *   imports any infrastructure directly.
- * ==============================================================================
- */
+/** auth controller. Passes authDeps to each service call; no business logic. */
 import type { Request, Response } from 'express';
 import { ok, created, noContent, getIdentity } from '../../shared/http/responses.js';
 import { HEADER_IDEMPOTENCY_KEY } from '../../config/constants.js';
@@ -79,9 +66,7 @@ export async function postCustomerOnboard(req: Request, res: Response): Promise<
 export async function postRefresh(req: Request, res: Response): Promise<Response> {
   const body = req.body as RefreshBody;
 
-  // Fix H1: the device comes from the VALIDATED body (RefreshBody now
-  // declares it). When the app omits it, the service copies the device from
-  // the previous session — no fake 'unknown-device' is ever invented here.
+  // Without a device, the service reuses the previous session's.
   const out = await service.refreshSession(
     authDeps,
     body.refreshToken,
@@ -119,10 +104,6 @@ export async function getMe(req: Request, res: Response): Promise<Response> {
   res.setHeader('Cache-Control', 'no-store');
   return ok(res, out);
 }
-
-/* -----------------------------------------------------------------
- * Helpers
- * ----------------------------------------------------------------- */
 
 function clientIp(req: Request): string | null {
   return req.ip ?? null;

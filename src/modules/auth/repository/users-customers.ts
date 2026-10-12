@@ -1,22 +1,8 @@
 /**
- * ==============================================================================
- * auth.repository — customer user resolution, creation + profile loading
- * ==============================================================================
- * Handles the `customers` table (shared with the web CRM):
- *   • findCustomerByPhone        — phone lookup (production format first)
- *   • createCustomerIfAbsent     — called ONLY after onboarding is submitted;
- *                                  serialised per mobile so no duplicate rows
- *   • getCustomerStatusById      — existence check for refresh / me
- *   • loadCustomerProfile        — profile DTO for the login response
- *   • loadCustomerIdentityDetails — profile + requiresProfileSetup for /me
- *
- * NOTES
- *   • `customers` has no `status` column — an existing row is always active.
- *     Blocking a customer is done with mobile_registry.admin_blocked.
- *   • `customerPhone` has no UNIQUE index (the CRM already holds duplicates),
- *     so creation is protected by a MySQL named lock instead.
- *   • `created_at` is nullable — CRM rows may not have it.
- * ==============================================================================
+ * auth repository: customers (shared with the web CRM).
+ * No status column: customers are blocked via mobile_registry.
+ * customerPhone isn't unique (the CRM has duplicates), so creation uses a
+ * MySQL named lock. created_at may be null on CRM rows.
  */
 import type { RowDataPacket, ResultSetHeader, PoolConnection } from 'mysql2/promise';
 import { pool } from '../../../shared/db/pool.js';
@@ -35,9 +21,7 @@ import {
   placeholder,
 } from './users-shared.js';
 
-/* --------------------------------------------------------------------------
- * DB row shape
- * -------------------------------------------------------------------------- */
+/* DB row */
 type CustomerRow = RowDataPacket & {
   id: number;
   customerPhone: string;
@@ -59,13 +43,7 @@ function toResolved(r: CustomerRow): ResolvedUser {
   };
 }
 
-/* --------------------------------------------------------------------------
- * Phone lookup
- * --------------------------------------------------------------------------
- * When the CRM holds several rows for one number, the OLDEST row wins
- * (stable, and it is normally the original record bookings hang off).
- * Duplicates are logged so ops can merge them.
- * -------------------------------------------------------------------------- */
+/* Phone lookup. With duplicates the oldest row wins; duplicates are logged for cleanup. */
 async function findWith(runner: Runner, mobile: string): Promise<ResolvedUser | null> {
   const fmts = candidateFormats(mobile);
   const [rows] = await runner.execute<CustomerRow[]>(
@@ -94,15 +72,11 @@ export function findCustomerByPhone(mobile: string): Promise<ResolvedUser | null
   return findWith(pool, mobile);
 }
 
-/* --------------------------------------------------------------------------
- * Creation — ONLY after onboarding details are submitted
- * --------------------------------------------------------------------------
- * 1. Take a per-mobile MySQL named lock (same connection for the whole flow).
- * 2. Re-check: if the number now exists (double submit, or the CRM created
- *    it meanwhile) return THAT row — never insert a duplicate.
- * 3. Insert with the production phone format.
- * 4. Release the lock.
- * -------------------------------------------------------------------------- */
+/*
+ * Creation, after onboarding only. Under a per-mobile named lock (one
+ * connection throughout): re-check, return an existing row if found,
+ * otherwise insert.
+ */
 export async function createCustomerIfAbsent(
   mobile: string,
   details: CustomerOnboardingDetails,
@@ -149,12 +123,9 @@ export async function createCustomerIfAbsent(
   }
 }
 
-/* --------------------------------------------------------------------------
- * Status by id — used on refresh and /me
- * -------------------------------------------------------------------------- */
+/* Status by id (refresh, /me) */
 export async function getCustomerStatusById(id: string): Promise<ResolvedUser['status'] | null> {
-  // `customers` has no status column — the admin block on the phone number
-  // (mobile_registry) is the only way to deactivate a customer.
+  // No status column: an admin block on the phone is the only deactivation.
   const [rows] = await pool.execute<RowDataPacket[]>(
     'SELECT id, customerPhone FROM customers WHERE id = ? LIMIT 1',
     [id],
@@ -164,9 +135,7 @@ export async function getCustomerStatusById(id: string): Promise<ResolvedUser['s
   return blocked ? 'inactive' : 'active';
 }
 
-/* --------------------------------------------------------------------------
- * Profile loaders
- * -------------------------------------------------------------------------- */
+/* Profile loaders */
 function toProfile(r: CustomerRow): UserProfileDto {
   const phone = normalisePhoneToE164(r.customerPhone ?? '');
   return {

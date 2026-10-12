@@ -1,21 +1,8 @@
 /**
- * ==============================================================================
- * auth.service — MSG91 dispatch outcome handling
- * ==============================================================================
- * Every provider failure has two orthogonal concerns:
- *
- *   1. Observability — logDispatchFailure() picks a log level (fatal / error
- *      / warn) that matches operational urgency. `alarm=...` fields are the
- *      hooks your alerting stack matches on (Loki / Datadog / Grafana etc.).
- *
- *   2. Client contract — throwDispatchError() converts the outcome into an
- *      AppError subclass with a stable `code` the mobile app already handles.
- *      Never returns; the caller should not have code after the call.
- *
- * Kept apart because the two evolve independently. Adding a new alarm hook
- * or renaming a log tag should never risk changing what the client sees;
- * adding a new error code should never risk paging on-call by accident.
- * ==============================================================================
+ * MSG91 send failures: logDispatchFailure() logs at a severity matching the
+ * urgency (with `alarm` fields for alerting); throwDispatchError() maps the
+ * failure to the stable error the app expects. Kept separate so logging
+ * changes never alter the API contract.
  */
 import { logger } from '../../../shared/logger/index.js';
 import {
@@ -28,13 +15,7 @@ import { AUTH_ERROR } from '../types.js';
 import { maskMobile } from '../../../shared/utils/phone.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
 
-/**
- * Log a failed dispatch at a severity that matches operational urgency.
- *
- *   fatal   — config broken; pages on-call immediately.
- *   error   — provider outage; investigate but not necessarily paging.
- *   warn    — routine transient blip; monitor but don't page.
- */
+/** fatal: config broken (page). error: provider outage. warn: transient blip. */
 export function logDispatchFailure(
   mobile: string,
   role: UserRole,
@@ -69,9 +50,7 @@ export function logDispatchFailure(
       );
       break;
     case 'circuit_open':
-      // The circuit is open because we already logged fatal when it opened.
-      // Individual short-circuits are just warn — they're the breaker doing
-      // its job, not new information.
+      // Opening the breaker was already logged; each short-circuit is just a warn.
       logger.warn(base, 'msg91 circuit breaker is open — short-circuited send');
       break;
     case 'provider_server_error':
@@ -89,23 +68,13 @@ export function logDispatchFailure(
 }
 
 /**
- * Convert a failed dispatch into an `AppError` subclass and throw. Never returns.
- *
- * Mapping rules (status codes and `code` values are a contract with the
- * mobile app — do not change them):
- *   - Provider is temporarily unavailable (wallet empty, breaker open) → 503
- *     with `SERVICE_UNAVAILABLE`. The mobile client shows "try again shortly."
- *   - Provider is throttling our account → 409 `provider_rate_limited`.
- *   - Any other provider rejection the user can't fix (config bug, bad
- *     template, provider outage) → 409 with `OTP_SEND_FAILED`.
- *
- * CLIENT MESSAGES ARE FIXED, GENERIC STRINGS (security fix — audit item #9).
- *   MSG91's raw error text ("Invalid authkey", template ids, account state)
- *   used to be copied straight into the response. That told any caller how
- *   our SMS account is configured and when it is broken. The raw text is
- *   still recorded where operators need it — logDispatchFailure() above and
- *   the otp_events audit row — but never leaves the server. For the same
- *   reason the 503 no longer reports *why* (e.g. "wallet_low").
+ * Throws the client-facing error for a failed send. Statuses and codes are
+ * an API contract; don't change them:
+ *   unavailable (wallet empty, breaker open) → 503 SERVICE_UNAVAILABLE
+ *   provider throttling                      → 409 provider_rate_limited
+ *   anything else                            → 409 OTP_SEND_FAILED
+ * Messages are fixed and generic: MSG91's raw error reveals our account
+ * setup, so it only goes to logs and otp_events.
  */
 export const DISPATCH_CLIENT_MESSAGE = {
   unavailable: 'OTP service is temporarily unavailable. Please try again shortly.',

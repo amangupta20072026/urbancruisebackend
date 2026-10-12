@@ -1,14 +1,4 @@
-/**
- * ==============================================================================
- * auth.repository — UC staff user resolution + profile loading
- * ==============================================================================
- * Handles the `uc_staff` table:
- *   • findUcStaffByPhone        — phone lookup
- *   • loadUcStaffProfile        — profile DTO for /verify response
- *   • loadUcStaffIdentityDetails — profile + requiresProfileSetup for /me
- *                                  returns null when the row has vanished
- * ==============================================================================
- */
+/** auth repository: uc_staff. Only status 'active' may log in. */
 import type { RowDataPacket } from 'mysql2/promise';
 import { pool } from '../../../shared/db/pool.js';
 import { isRawPhoneAdminBlocked } from './mobile-registry.js';
@@ -21,9 +11,7 @@ import {
   normStatus,
 } from './users-shared.js';
 
-/* --------------------------------------------------------------------------
- * DB row shape
- * -------------------------------------------------------------------------- */
+/* DB row */
 type UcStaffRow = RowDataPacket & {
   id: number;
   full_name: string;
@@ -34,9 +22,7 @@ type UcStaffRow = RowDataPacket & {
   created_at: Date;
 };
 
-/* --------------------------------------------------------------------------
- * Phone lookup
- * -------------------------------------------------------------------------- */
+/* Phone lookup */
 export async function findUcStaffByPhone(mobile: string): Promise<ResolvedUser | null> {
   const fmts = candidateFormats(mobile);
   const [rows] = await pool.execute<UcStaffRow[]>(
@@ -54,9 +40,7 @@ export async function findUcStaffByPhone(mobile: string): Promise<ResolvedUser |
   };
 }
 
-/* --------------------------------------------------------------------------
- * Status by id — 'active' only; 'suspended' and 'left' are inactive.
- * -------------------------------------------------------------------------- */
+/* Status by id: 'suspended' and 'left' are inactive. */
 export async function getUcStaffStatusById(id: string): Promise<ResolvedUser['status'] | null> {
   const [rows] = await pool.execute<UcStaffRow[]>(
     'SELECT id, status, mobile FROM uc_staff WHERE id = ? LIMIT 1',
@@ -69,9 +53,7 @@ export async function getUcStaffStatusById(id: string): Promise<ResolvedUser['st
   return (await isRawPhoneAdminBlocked(r.mobile)) ? 'inactive' : 'active';
 }
 
-/* --------------------------------------------------------------------------
- * Profile loaders
- * -------------------------------------------------------------------------- */
+/* Profile loaders */
 export async function loadUcStaffProfile(id: string): Promise<UserProfileDto> {
   const [rows] = await pool.execute<UcStaffRow[]>(
     `SELECT id, full_name, email, mobile, created_at

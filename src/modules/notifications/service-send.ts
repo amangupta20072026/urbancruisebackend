@@ -1,26 +1,6 @@
 /**
- * ==============================================================================
- * notifications.service — send orchestration
- * ==============================================================================
- * Owns the write path that other modules call when they want to notify a user:
- *   sendNotification(deps, input) — persist inbox row + dispatch push
- *
- * ORDER OF OPERATIONS (invariant — do not reorder):
- *   1. INSERT the notifications row first. Even if push fails entirely, the
- *      user sees the notification in their inbox on next app open.
- *   2. Load FCM tokens for the entity. If none exist, return early (inbox only).
- *   3. Dispatch via deps.push.dispatch() — non-throwing by contract.
- *   4. Fire-and-forget prune of stale tokens returned by the dispatcher.
- *
- * SRP: this file knows only about send orchestration. It has no knowledge of
- * inbox read-side state or token registration lifecycle. It calls the
- * repository directly (step 1 & 2) and delegates push to IPushDispatcher
- * (step 3) — that is its entire job.
- *
- * PUSH POSTURE:
- *   Push is non-critical. A failed push never throws to the caller. The
- *   inbox row is the durable record; push is a convenience delivery channel.
- * ==============================================================================
+ * Delivers a notification. The inbox row is written first and is the durable
+ * record; push is best-effort and never throws to the caller.
  */
 import { logger } from '../../shared/logger/index.js';
 import * as repo from './repository.js';
@@ -31,8 +11,7 @@ export async function sendNotification(
   deps: NotificationServiceDeps,
   input: CreateNotificationInput,
 ): Promise<void> {
-  // 1. Persist the inbox row FIRST — even if push fails, the user sees it
-  //    in the inbox when they open the app.
+  // Inbox row first, so the user sees it even if push fails.
   let notifUuid: string;
   try {
     notifUuid = await repo.insertNotification(input);
@@ -44,8 +23,7 @@ export async function sendNotification(
     throw err;
   }
 
-  // 2. Load FCM tokens — may be empty if the user denied push permission
-  //    or never completed token registration.
+  // Empty when push permission was denied or no token was registered.
   const tokenRows = await repo
     .getTokensForEntity({ role: input.role, entityId: input.entityId })
     .catch(err => {
@@ -61,7 +39,7 @@ export async function sendNotification(
     return;
   }
 
-  // 3. Dispatch push via injected IPushDispatcher (best-effort — never throws)
+  // dispatch() never throws.
   const clickJson = input.payload ? JSON.stringify(input.payload) : undefined;
   const dispatchResult = await deps.push.dispatch({
     tokens: tokenRows.map(r => r.fcm_token),
@@ -70,7 +48,7 @@ export async function sendNotification(
     ...(clickJson !== undefined ? { click: clickJson } : {}),
   });
 
-  // 4. Prune stale/invalid tokens returned by the dispatcher (fire-and-forget)
+  // Prune invalid tokens in the background.
   if (dispatchResult.tokensToDelete.length > 0) {
     repo.deleteStalePushTokens(dispatchResult.tokensToDelete).catch(err => {
       logger.error({ err }, 'notifications: stale token pruning failed');

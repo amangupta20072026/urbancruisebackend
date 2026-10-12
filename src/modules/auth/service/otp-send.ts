@@ -1,67 +1,8 @@
 /**
- * ==============================================================================
- * auth.service — sendOtp
- * ==============================================================================
- * Orchestrates POST /auth/otp/request.
- *
- * ORDER OF CHECKS (matters — keep this order):
- *   0. Role enabled on this environment? (fix H2) — FIRST, so a disabled
- *                                       role costs nothing: no Redis quota,
- *                                       no DB lookup, no SMS, and no replay
- *                                       of a snapshot taken while the role
- *                                       was still enabled.
- *   1. Idempotency snapshot lookup    — cheap; fingerprinted by
- *                                       sha256(mobile|role) so a reused key
- *                                       with a different payload returns 409
- *                                       rather than replaying someone else's
- *                                       response.
- *   2. Mobile registry hard blocks    — admin block, lock.
- *   2b. Post-lockout CAPTCHA gate     — while captcha_required_until is in
- *                                       the future, a valid CAPTCHA token is
- *                                       required (audit fix #10). Only when
- *                                       HCAPTCHA_SECRET is configured; test
- *                                       mobiles are exempt. Fails CLOSED if
- *                                       the CAPTCHA provider is unreachable.
- *   3. Reserve rate-limit quota        — ATOMIC: cooldown via SET NX, then
- *                                       (every refusal is now recorded as an
- *                                       otp_events 'rate_limited' row naming
- *                                       the limit; the daily cap also logs
- *                                       `alarm: 'otp_daily_cap_reached'` —
- *                                       finding M3: someone can use up a
- *                                       victim's daily OTPs on purpose)
- *                                       INCR every bucket and compare the
- *                                       post-increment value. Done BEFORE
- *                                       the account lookup (so the lookup is
- *                                       throttled) and BEFORE any SMS (so
- *                                       parallel requests cannot all slip
- *                                       through — audit fix #1).
- *   4. Vendor / UC / Driver gate       — the account MUST already exist in
- *                                       its table and be active. Otherwise
- *                                       403 ACCOUNT_NOT_PROVISIONED /
- *                                       ACCOUNT_SUSPENDED with a clear
- *                                       message, and NO SMS is sent. The
- *                                       rejected attempt still burns rate-
- *                                       limit quota, which caps how fast
- *                                       anyone can probe which numbers are
- *                                       registered.
- *                                       Customers are NOT checked here: new
- *                                       and existing customers both receive
- *                                       an OTP, so this endpoint reveals
- *                                       nothing about customer accounts.
- *   5. Generate OTP, HMAC it, store the session.
- *   6. MSG91 dispatch — skipped for test mobiles. On a definitive provider
- *      failure the per-mobile quota is refunded (user may retry at once).
- *   7. Insert otp_events row (via audit sink).
- *   8. Snapshot response for idempotency.
- *   9. Best-effort mobile_registry touch.
- *
- * DESIGN CHANGE (DIP fix):
- *   Accepts AuthServiceDeps instead of importing the concrete redis /
- *   repo singletons. All infrastructure access goes through:
- *     deps.store  — IOtpSessionStore  (was: redis + key builders)
- *     deps.repo   — IAuthRepository   (was: import * as repo)
- *     deps.audit  — IAuditSink        (was: import { audit } + repo.insertOtpEvent)
- * ==============================================================================
+ * POST /auth/otp/request. The order of checks matters; see the step comments.
+ * Customers always get an OTP (new or existing), so this endpoint never
+ * reveals whether a customer account exists. Vendor, driver and uc numbers
+ * must already have an active account, or no SMS is sent.
  */
 import { randomInt } from 'node:crypto';
 import {
@@ -93,21 +34,17 @@ import { logDispatchFailure, throwDispatchError } from './dispatch-outcome.js';
 import { audit } from './audit.js';
 import { assertRoleEnabled } from '../../../shared/rbac/enabled-roles.js';
 
-/* ==============================================================================
- * Public entry
- * ============================================================================== */
-
 export type SendOtpParams = {
-  phone: string; // 10-digit, validated upstream
+  phone: string; // 10 digits, validated
   countryCode: '+91';
   role: UserRole;
   idempotencyKey: string | null;
   ip: string | null;
-  /** hCaptcha token — required only inside a post-lockout CAPTCHA window. */
+  /** Required only inside a post-lockout CAPTCHA window. */
   captchaToken?: string;
 };
 
-/** Numbers that bypass MSG91 entirely and receive `MSG91_TEST_OTP`. */
+/** Numbers that skip MSG91 and accept MSG91_TEST_OTP. */
 const TEST_MOBILES: ReadonlySet<string> = new Set(
   ENV.MSG91_TEST_MOBILES.split(',')
     .map(s => s.trim())
@@ -118,14 +55,14 @@ export async function sendOtp(
   deps: AuthServiceDeps,
   p: SendOtpParams,
 ): Promise<RequestOtpResponseDto> {
-  // 0. Role gate (fix H2) — before anything else is touched.
+  // 0. Role enabled? First, so a disabled role costs nothing.
   assertRoleEnabled(deps.enabledRoles, p.role);
 
   const { store, repo } = deps;
   const mobile = normalizeMobile(p.phone, p.countryCode);
   const isTest = TEST_MOBILES.has(mobile);
 
-  // 1. Idempotency snapshot
+  // 1. Idempotent replay. A key reused for another mobile or role → 409.
   if (p.idempotencyKey) {
     const snap = await store.getIdempotencySnapshot(p.idempotencyKey);
     if (snap) {
@@ -150,7 +87,7 @@ export async function sendOtp(
     }
   }
 
-  // 2. Mobile registry hard blocks
+  // 2. Admin block or brute-force lock.
   const flags = await repo.getMobileFlags(mobile);
   if (flags?.admin_blocked === 1) {
     await audit(deps.audit, {
@@ -172,7 +109,7 @@ export async function sendOtp(
     );
   }
 
-  // 2b. Post-lockout CAPTCHA gate (only when configured; test mobiles exempt).
+  // 2b. Post-lockout CAPTCHA (when configured; test mobiles exempt).
   if (
     !isTest &&
     deps.captcha.enabled &&
@@ -182,24 +119,22 @@ export async function sendOtp(
     await enforceCaptcha(deps, p, mobile);
   }
 
-  // 3. Reserve quota atomically (before the account lookup, so probing is
-  //    throttled, and before any SMS, so parallel requests can't race past).
+  // 3. Reserve quota atomically: before the account lookup (throttles
+  //    probing) and before any SMS (parallel requests can't race past).
   let reserved: { ipBlock: string | null };
   try {
     reserved = await reserveSendQuota(store, mobile, p.ip, isTest);
   } catch (err) {
     if (err instanceof RateLimitError) {
-      // M3 visibility: without this row a quota-exhaustion attack left no
-      // trace in otp_events at all.
+      // Record refusals so quota-exhaustion attacks show up in otp_events.
       await audit(deps.audit, {
         mobile,
         role: p.role,
         event: 'rate_limited',
         ip: p.ip,
         msg: err.code,
-        // No idempotencyKey here: otp_events.idempotency_key is UNIQUE, so
-        // tagging a refusal with it would block the success row of a later
-        // retry that uses the same key (see finding N3).
+        // No idempotencyKey: the column is UNIQUE, and a refusal row would
+        // block the success row of a later retry with the same key.
       });
       if (err.code === 'send_limit_day') {
         logger.warn(
@@ -211,13 +146,12 @@ export async function sendOtp(
     throw err;
   }
 
-  // 4. Vendor / UC / Driver must be a pre-existing, active account.
+  // 4. Vendor, driver and uc accounts must exist and be active.
   if (p.role !== 'customer') {
     const account = await repo.findUserByPhone(p.role, mobile);
     if (!account || account.status !== 'active') {
       const reason = account ? 'inactive' : 'not_provisioned';
-      // Quota was already consumed in step 3 and is deliberately NOT refunded,
-      // so this endpoint can't be used as a free lookup oracle.
+      // Quota is not refunded, so number lookups aren't free.
       await audit(deps.audit, {
         mobile,
         role: p.role,
@@ -245,7 +179,7 @@ export async function sendOtp(
     }
   }
 
-  // 5. Generate OTP + session
+  // 5. Generate the OTP and store its HMAC.
   const requestId = newId();
   const otp = isTest ? ENV.MSG91_TEST_OTP : generateOtp();
 
@@ -263,7 +197,7 @@ export async function sendOtp(
 
   await store.setOtpSession(session, OTP_SESSION_TTL_SECONDS);
 
-  // 6. Dispatch
+  // 6. Send (skipped for test mobiles).
   let providerRequestId: string | null = null;
   let attemptNumber = 1;
 
@@ -276,8 +210,7 @@ export async function sendOtp(
 
     if (!dispatch.ok) {
       logDispatchFailure(mobile, p.role, dispatch);
-      // Nothing was sent: drop the now-useless OTP session and give the user
-      // their quota back so an MSG91 outage doesn't lock them out.
+      // Nothing sent: drop the session and refund the user's quota.
       await Promise.all([
         store.deleteOtpSession(requestId),
         refundSendQuota(store, mobile, reserved.ipBlock),
@@ -310,7 +243,7 @@ export async function sendOtp(
     }
   }
 
-  // 7. Audit event
+  // 7. Audit.
   await audit(deps.audit, {
     mobile,
     role: p.role,
@@ -330,25 +263,20 @@ export async function sendOtp(
     testMode: isTest,
   };
 
-  // 8. Idempotency snapshot
+  // 8. Save the response for idempotent replay.
   if (p.idempotencyKey) {
     const fp = sha256(`${mobile}|${p.role}`);
     await store.setIdempotencySnapshot(p.idempotencyKey, { fp, response }, IDEMPOTENCY_TTL_SECONDS);
   }
 
-  // 9. Best-effort mobile registry touch
-  // MUST catch: server.ts treats an unhandled rejection as fatal, so an
-  // uncaught DB blip here would take the whole worker down.
+  // 9. Best-effort registry touch. Must catch: an unhandled rejection
+  //    shuts the worker down (server.ts).
   repo.touchMobileRegistry(mobile).catch((err: unknown) => {
     logger.warn({ err, mobile: maskMobile(mobile) }, 'otp send: mobile_registry touch failed');
   });
 
   return response;
 }
-
-/* ==============================================================================
- * Local helpers
- * ============================================================================== */
 
 const ROLE_LABEL: Record<Exclude<UserRole, 'customer'>, string> = {
   vendor: 'a vendor',
@@ -357,9 +285,8 @@ const ROLE_LABEL: Record<Exclude<UserRole, 'customer'>, string> = {
 };
 
 /**
- * Throws unless the request carries a CAPTCHA token the provider accepts.
- * Runs BEFORE quota is reserved, so a bot without a solved CAPTCHA can
- * neither send an SMS nor burn the real owner's quota.
+ * Throws unless the CAPTCHA token is valid. Runs before quota is reserved,
+ * so a bot can't send SMS or burn the owner's quota.
  */
 async function enforceCaptcha(
   deps: AuthServiceDeps,
@@ -385,8 +312,7 @@ async function enforceCaptcha(
   if (verdict.ok) return;
 
   if (verdict.reason === 'unavailable') {
-    // Fail CLOSED: this gate is only demanded from numbers that just tripped
-    // the brute-force lock, so refusing for a few minutes is the safe side.
+    // Fail closed: only numbers that just tripped the lock reach this gate.
     logger.error(
       { alarm: 'captcha_provider_unavailable', mobile: maskMobile(mobile) },
       'otp send: CAPTCHA provider unreachable — refusing send for a captcha-gated number',

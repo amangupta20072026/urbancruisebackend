@@ -1,6 +1,4 @@
-/**
- * customer.payments — Zod schemas
- */
+/** customer.payments request schemas. */
 import { z } from 'zod';
 
 export const paymentIdParamSchema = z.object({

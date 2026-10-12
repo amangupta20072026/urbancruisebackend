@@ -1,38 +1,24 @@
 /**
- * ==============================================================================
- * auth — Zod schemas (validated req.body shapes)
- * ==============================================================================
- * Client sends phone SPLIT into `phone` (10 digits) + `countryCode` ('+91').
- * Server normalises to E.164-without-plus ('919812345678') downstream — see
- * `normalizeMobile()` in the service.
- * ==============================================================================
+ * auth request schemas. The app sends a 10-digit `phone` and `countryCode`
+ * '+91' (India only); the service normalises to '919812345678'.
  */
 import { z } from 'zod';
 
-/** All roles the auth module knows how to resolve. */
+/** Roles that can log in. */
 const RoleSchema = z.enum(['customer', 'vendor', 'driver', 'uc']);
 
-/** India-only for MVP. Client already enforces this; server double-checks. */
+/** India only for now. */
 const IndianPhoneSchema = z.string().regex(/^[6-9]\d{9}$/, 'invalid Indian mobile number');
 const CountryCodeSchema = z.literal('+91');
-
-/* -----------------------------------------------------------------
- * POST /auth/otp/request
- * ----------------------------------------------------------------- */
 
 export const RequestOtpBody = z.object({
   phone: IndianPhoneSchema,
   countryCode: CountryCodeSchema,
   role: RoleSchema,
-  /** hCaptcha token. Required only after a 400 `captcha_required` (the number
-   *  is inside its post-lockout CAPTCHA window and HCAPTCHA_SECRET is set). */
+  /** hCaptcha token. Needed only after a `captcha_required` response. */
   captchaToken: z.string().min(1).max(4096).optional(),
 });
 export type RequestOtpBody = z.infer<typeof RequestOtpBody>;
-
-/* -----------------------------------------------------------------
- * POST /auth/otp/verify
- * ----------------------------------------------------------------- */
 
 const DeviceMetaSchema = z.object({
   id: z.string().min(1).max(64),
@@ -51,42 +37,26 @@ export const VerifyOtpBody = z.object({
 });
 export type VerifyOtpBody = z.infer<typeof VerifyOtpBody>;
 
-/* -----------------------------------------------------------------
- * POST /auth/refresh
- * ----------------------------------------------------------------- */
-
 export const RefreshBody = z.object({
   refreshToken: z.string().min(20).max(4096),
   /**
-   * The device making the refresh (same shape as on /otp/verify). Optional
-   * so older app builds that omit it still refresh. Fix H1: this field was
-   * missing from the schema, and Zod strips undeclared keys — the device the
-   * app DID send was silently dropped, every refreshed session was saved as
-   * a fake 'unknown-device', and logout then removed the wrong push token.
-   * When absent, the server copies the device from the previous session.
+   * Optional for older app builds; when absent the previous session's device
+   * is kept. Must stay declared: Zod strips unknown keys, and logout relies
+   * on the session's device id to remove the right push token.
    */
   device: DeviceMetaSchema.optional(),
 });
 export type RefreshBody = z.infer<typeof RefreshBody>;
 
-/* -----------------------------------------------------------------
- * POST /auth/logout
- * ----------------------------------------------------------------- */
-
 export const LogoutBody = z.object({
-  /** Optional — if missing, logout revokes only the current access-token session. */
+  /** Optional. Logout identifies the session from the access token. */
   refreshToken: z.string().min(20).max(4096).optional(),
-  /** 'current' (default) — revoke this session only. 'all' — revoke every
-   *  session for this user across all devices. */
+  /** 'current' (default) revokes this session; 'all' revokes every device. */
   scope: z.enum(['current', 'all']).default('current'),
 });
 export type LogoutBody = z.infer<typeof LogoutBody>;
 
-/* -----------------------------------------------------------------
- * POST /auth/customer/onboard — minimum details for a NEW customer.
- * Lengths match the `customers` columns (firstName/lastName varchar(50),
- * customerEmail varchar(100)).
- * ----------------------------------------------------------------- */
+/** Lengths match the customers columns (names 50, email 100). */
 const NAME_RE = /^[\p{L}][\p{L}\p{M} .'-]*$/u;
 
 const optionalTrimmed = (max: number) =>

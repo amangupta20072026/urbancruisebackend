@@ -1,13 +1,6 @@
 /**
- * ==============================================================================
- * RedisOtpSessionStore — production IOtpSessionStore backed by ioredis
- * ==============================================================================
- * Wraps the shared `redis` singleton. Every key is built through the typed
- * key-registry in shared/redis/keys.ts — no inline key strings here.
- *
- * All Redis operations are thin wrappers. No business logic lives here;
- * that belongs in the service layer.
- * ==============================================================================
+ * IOtpSessionStore backed by Redis. All keys come from shared/redis/keys.ts.
+ * Multi-step updates run as Lua scripts so each is atomic.
  */
 
 import type {
@@ -35,10 +28,9 @@ import {
 } from '../../../shared/redis/keys.js';
 
 /**
- * INCR + EXPIRE as ONE atomic step. Sets the TTL on the first increment, and
- * also repairs a key that somehow has no TTL (TTL = -1) so a counter can
- * never become permanent and lock a number out forever.
- *   KEYS[1] = counter key, ARGV[1] = ttl seconds. Returns the new value.
+ * Atomic INCR + EXPIRE. Sets the TTL on first increment and repairs a key
+ * with no TTL, so a counter can never lock a number out forever.
+ * KEYS[1] = counter, ARGV[1] = ttl seconds. Returns the new value.
  */
 const INCR_WITH_TTL = `
 local n = redis.call('INCR', KEYS[1])
@@ -47,17 +39,16 @@ if n == 1 or redis.call('TTL', KEYS[1]) < 0 then
 end
 return n`;
 
-/** DECR that never goes below zero and never creates a key. KEYS[1] = counter. */
+/** DECR that never goes below zero or creates a key. KEYS[1] = counter. */
 const DECR_FLOOR_ZERO = `
 local v = tonumber(redis.call('GET', KEYS[1]) or '0')
 if v > 0 then return redis.call('DECR', KEYS[1]) end
 return 0`;
 
 /**
- * IP-block window send (finding M4) — ONE atomic step:
- *   HINCRBY s, set TTL on creation (or repair a TTL-less key), read v / f.
- *   KEYS[1] = window hash, ARGV[1] = window seconds.
- *   Returns { s, v, f, ttlSeconds }.
+ * Atomically counts a send in an IP-block window (sets or repairs the TTL)
+ * and reads the counters. KEYS[1] = window hash, ARGV[1] = window seconds.
+ * Returns { s, v, f, ttlSeconds }.
  */
 const IP_BLOCK_SEND = `
 local s = redis.call('HINCRBY', KEYS[1], 's', 1)
@@ -69,8 +60,10 @@ end
 local vf = redis.call('HMGET', KEYS[1], 'v', 'f')
 return { s, tonumber(vf[1] or '0'), tonumber(vf[2] or '0'), ttl }`;
 
-/** HINCRBY a field ONLY if the window already exists (never creates a key,
- *  never touches the TTL). KEYS[1] = window hash, ARGV[1] = field. */
+/**
+ * HINCRBY only if the window exists; never creates a key or changes the TTL.
+ * KEYS[1] = window hash, ARGV[1] = field.
+ */
 const HINCR_IF_EXISTS = `
 if redis.call('EXISTS', KEYS[1]) == 1 then
   return redis.call('HINCRBY', KEYS[1], ARGV[1], 1)
@@ -78,11 +71,9 @@ end
 return 0`;
 
 /**
- * Live-session index add (finding L3) — ONE atomic step:
- *   1. drop members whose expiry (score, epoch ms) is already past,
- *   2. add this session with its expiry,
- *   3. set the key to expire with its LATEST member.
- * KEYS[1] = index ZSET, ARGV[1] = now ms, ARGV[2] = expiry ms, ARGV[3] = jti.
+ * Atomically adds a session to the index: drops expired members, adds this
+ * one (score = expiry ms) and expires the key with its latest member.
+ * KEYS[1] = ZSET, ARGV[1] = now ms, ARGV[2] = expiry ms, ARGV[3] = jti.
  */
 const SESSION_INDEX_ADD = `
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
@@ -99,7 +90,7 @@ async function incrWithTtl(key: string, ttlSeconds: number): Promise<number> {
 }
 
 export class RedisOtpSessionStore implements IOtpSessionStore {
-  // ── OTP sessions ────────────────────────────────────────────────────────
+  // OTP sessions
 
   async setOtpSession(session: OtpSession, ttlSeconds: number): Promise<void> {
     await redis.set(otpSession(session.requestId), JSON.stringify(session), 'EX', ttlSeconds);
@@ -112,9 +103,7 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
   }
 
   async deleteOtpSession(requestId: string): Promise<boolean> {
-    // Delete the session key ON ITS OWN so DEL's count tells us whether THIS
-    // call removed it. Redis serialises the DELs: exactly one concurrent
-    // caller sees 1 (the claim); every other caller sees 0.
+    // DEL the session alone: exactly one concurrent caller gets 1 (the claim).
     const removed = await redis.del(otpSession(requestId));
     await redis.del(otpAttempts(requestId));
     return removed === 1;
@@ -124,7 +113,7 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
     return incrWithTtl(otpAttempts(requestId), ttlSeconds);
   }
 
-  // ── Idempotency ─────────────────────────────────────────────────────────
+  // Idempotency
 
   async getIdempotencySnapshot(idempotencyKey: string): Promise<IdempotencySnapshot | null> {
     const raw = await redis.get(idempotencySnapshot(idempotencyKey));
@@ -145,7 +134,7 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
     );
   }
 
-  // ── Rate-limit counters (per-mobile) — all atomic ──────────────────────
+  // Rate-limit counters (per-mobile)
 
   async tryAcquireSendCooldown(
     mobile: string,
@@ -180,7 +169,7 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
     ]);
   }
 
-  // ── Rate-limit counters (anti-pumping) — all atomic ─────────────────────
+  // Rate-limit counters (anti-pumping)
 
   async recordIpBlockSend(ipBlockKey: string): Promise<IpBlockWindow> {
     const raw = (await redis.eval(
@@ -209,7 +198,7 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
     return incrWithTtl(otpRateNumberPrefix(prefix), 3_600);
   }
 
-  // ── Verify-fail fast counter ─────────────────────────────────────────────
+  // Verify-fail fast counter
 
   async incrementVerifyFail(mobile: string, windowSeconds: number): Promise<number> {
     return incrWithTtl(otpVerifyFail(mobile), windowSeconds);
@@ -219,7 +208,7 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
     await redis.del(otpVerifyFail(mobile));
   }
 
-  // ── JWT deny-list ────────────────────────────────────────────────────────
+  // JWT deny-list
 
   async denySession(sid: string, ttlSeconds: number): Promise<void> {
     await redis.set(jwtDeny(sid), '1', 'EX', ttlSeconds);
@@ -229,7 +218,7 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
     return (await redis.exists(jwtDeny(sid))) === 1;
   }
 
-  // ── Active-session index ─────────────────────────────────────────────────
+  // Active-session index
 
   async addActiveSession(
     role: UserRole,
@@ -246,8 +235,7 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
         expiresAt.getTime(),
         jti,
       ),
-      // Separate command (not inside the script) so the two keys never need
-      // to share a cluster slot. UNLINK frees memory off the main thread.
+      // Removes the legacy set. Outside the script so the keys needn't share a cluster slot.
       redis.unlink(legacySessionsActiveSet(role, entityId)),
     ]);
   }
@@ -265,7 +253,7 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
     await Promise.all(jtis.map(sid => redis.set(jwtDeny(sid), '1', 'EX', ttlSeconds)));
   }
 
-  // ── Customer onboarding tickets ──────────────────────────────────────────
+  // Customer onboarding tickets
 
   async setOnboardingTicket(
     tokenHash: string,
@@ -276,7 +264,7 @@ export class RedisOtpSessionStore implements IOtpSessionStore {
   }
 
   async takeOnboardingTicket(tokenHash: string): Promise<OnboardingTicket | null> {
-    // MULTI/EXEC = atomic GET+DEL; works on every Redis version (GETDEL needs 6.2+).
+    // Atomic GET + DEL via MULTI (GETDEL needs Redis 6.2+).
     const k = onboardingTicket(tokenHash);
     const res = await redis.multi().get(k).del(k).exec();
     const raw = res?.[0]?.[1];

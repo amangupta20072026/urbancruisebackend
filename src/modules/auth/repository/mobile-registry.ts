@@ -1,14 +1,7 @@
 /**
- * ==============================================================================
- * auth.repository — mobile_registry
- * ==============================================================================
- * Persistent per-mobile flags used across OTP flows:
- *   - verify_failure_count / verify_locked_until — brute-force protection
- *   - captcha_required_until                     — hCaptcha gate window
- *   - admin_blocked / admin_blocked_reason       — manual block
- *
- * All queries are parameterised via `?` placeholders.
- * ==============================================================================
+ * auth repository: mobile_registry, the per-mobile flags for brute-force
+ * locks (verify_failure_count, verify_locked_until), the CAPTCHA window
+ * (captcha_required_until) and admin blocks.
  */
 import type { RowDataPacket } from 'mysql2/promise';
 import { pool } from '../../../shared/db/pool.js';
@@ -78,18 +71,11 @@ export async function resetVerifyFailure(mobile: string): Promise<void> {
 }
 
 /**
- * Is the phone stored on an account row admin-blocked in mobile_registry?
- *
- * Used by the per-role `get*StatusById` functions so that an admin block
- * takes effect on EXISTING sessions (at the next refresh or /auth/me), not
- * only at the next login (audit fix #6). Before this, `customers` and
- * `drivers` — which have no status column — were always reported 'active',
- * so a blocked customer kept refreshing tokens for the full 30-day TTL.
- *
- * `rawPhone` is the value as stored in the entity table, in any of the legacy
- * formats ('+91 98123 45678', '919812345678', '9812345678', …). It is reduced
- * to the canonical mobile_registry key ('91' + 10 digits) — the same form
- * normalizeMobile() produces at login. Unparseable values are not blocked.
+ * Whether an account's stored phone is admin-blocked. Used by the
+ * get*StatusById functions so a block also ends existing sessions at the
+ * next refresh or /auth/me, not just new logins.
+ * rawPhone may be in any stored format; it's reduced to the registry key
+ * ('91' + 10 digits). Unparseable values are treated as not blocked.
  */
 export async function isRawPhoneAdminBlocked(rawPhone: string | null): Promise<boolean> {
   const last10 = (rawPhone ?? '').replace(/\D/g, '').slice(-10);

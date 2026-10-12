@@ -1,14 +1,6 @@
 /**
- * ==============================================================================
- * config — routes
- * ==============================================================================
- * Public paths (NO auth middleware — this is called before login):
- *   GET /config/app          — server-driven app config + version policy
- *
- * The global rate limit in app.ts is sufficient for this endpoint (it's
- * called at cold start, ~once per app open, and hits an in-memory config).
- * No per-endpoint limiter needed.
- * ==============================================================================
+ * config routes (public, called before login): GET /app.
+ * Covered by the global rate limit only; it's cheap and in-memory.
  */
 import { Router } from 'express';
 import { validate } from '../../shared/http/middleware/validate.js';

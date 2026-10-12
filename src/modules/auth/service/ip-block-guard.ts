@@ -1,53 +1,18 @@
 /**
- * ==============================================================================
- * auth.service — per-network (IP block) OTP guard  (finding M4)
- * ==============================================================================
- * PURE decision logic for the anti-SMS-pumping cap keyed by IPv4 /24 or
- * IPv6 /64. No Redis, no ENV, no logger — the caller supplies the window
- * counters and the policy, this file says allow / block. Unit-tested in
- * __tests__/ip-block-guard.test.ts.
+ * Per-network OTP guard against SMS pumping, keyed by IPv4 /24 or IPv6 /64.
+ * Pure logic: the caller supplies the hourly counters and policy.
  *
- * WHY NOT A SINGLE FLAT CAP (the M4 problem):
- *   Mobile carriers commonly use CGNAT: many subscribers share a small pool
- *   of public IPv4 addresses, so one /24 can front a large number of real
- *   users. A flat "100 OTPs / hour / /24" cannot tell a pumping bot from a
- *   busy carrier network, and would return 429 to genuine users for up to
- *   an hour.
- *
- * DESIGN PREMISE — conversion:
- *   Genuine users request an OTP in order to enter it; SMS pumping
- *   (IRSF / artificially-inflated traffic) targets numbers whose OTPs are
- *   not entered in the app. So a block's verify rate separates the two
- *   better than its raw volume. The guard counts, per block per hour:
- *     sends     — OTP send reservations from this block
- *     verifies  — successful verifications of OTPs SENT from this block
- *                 (credited to the send-side block stored in the OTP
- *                 session, so a phone changing IP between send and verify
- *                 still counts)
- *     failures  — sends the provider definitively failed (excluded from the
- *                 denominator so an MSG91 outage can't tank a block's rate)
- *
- * DECISION (separate caps per IP family, because an IPv4 /24 and an IPv6
- * /64 are different-sized buckets and are tuned independently):
- *
- *   sends ≤ softCap                       → allow  (not enough data to judge)
- *   sends > hardCap                       → BLOCK  (absolute ceiling — bounds
- *                                                   worst-case spend even if an
- *                                                   attacker fakes conversion)
- *   softCap < sends ≤ hardCap:
- *     conversion ≥ minConversion          → allow  (busy shared network — alarm
- *                                                   so ops can see it)
- *     conversion <  minConversion         → BLOCK  (looks like pumping)
- *
- *   conversion = verifies / max(1, sends − failures), clamped to [0, 1].
- *
- * minConversion should sit well BELOW the genuine conversion rate you see
- * in production: OTPs still in flight (sent, not yet typed) lower the
- * measured rate, and a borderline block should reach the hard cap rather
- * than lock real users out. The shipped defaults (see config/env.ts) are
- * STARTING VALUES, not measured ones — set them from your own otp_events
- * data and the otp_ip_block_soft / otp_ip_block_limit alarms.
- * ==============================================================================
+ * A flat cap would block busy carrier CGNAT ranges, so the guard also uses
+ * conversion: real users type their OTP, pumped numbers don't.
+ *   sends ≤ softCap                → allow
+ *   sends > hardCap                → block (bounds spend even if conversion is faked)
+ *   in between, conversion ≥ min   → allow, with an alarm
+ *   in between, conversion < min   → block
+ * conversion = verifies / max(1, sends − failures). Verifies are credited to
+ * the block the OTP was sent from; provider failures don't count against it.
+ * Keep minConversion well below the real rate (in-flight OTPs lower it).
+ * The env defaults are starting values; tune them from otp_events and the
+ * otp_ip_block_soft / otp_ip_block_limit alarms.
  */
 import type { IpBlockWindow } from '../ports/IOtpSessionStore.js';
 
@@ -56,16 +21,16 @@ export type { IpBlockWindow };
 export type IpFamily = 'v4' | 'v6';
 
 export type IpBlockCaps = {
-  /** Sends per hour below which a block is always allowed. */
+  /** At or below this many sends per hour: always allowed. */
   softCap: number;
-  /** Sends per hour above which a block is always refused. */
+  /** Above this many sends per hour: always refused. */
   hardCap: number;
 };
 
 export type IpBlockPolicy = {
   v4: IpBlockCaps;
   v6: IpBlockCaps;
-  /** Minimum verified/delivered ratio required above the soft cap (0..1). */
+  /** Minimum verified/delivered ratio above the soft cap (0..1). */
   minConversion: number;
 };
 
@@ -75,17 +40,13 @@ export type IpBlockDecision =
   | { outcome: 'block_hard_cap'; retryAfter: number }
   | { outcome: 'block_low_conversion'; conversion: number; retryAfter: number };
 
-/**
- * A low-conversion block can recover (other users in the block verify), so
- * we tell the client to retry sooner than the full window. A hard-cap block
- * cannot recover until the window expires.
- */
+/** Low conversion can recover within the window, so it gets a shorter Retry-After. */
 export const LOW_CONVERSION_MAX_RETRY_AFTER_SECONDS = 600;
 
-/** Emit a repeat alarm every N sends past a threshold (first crossing always). */
+/** Alarm on the first send past a threshold, then every N sends. */
 export const IP_BLOCK_ALARM_EVERY = 100;
 
-/** Bucket keys from shared/utils/ip-bucket.ts are "v4:a.b.c" or "v6:xxxx:…". */
+/** Keys from shared/utils/ip-bucket.ts look like "v4:a.b.c" or "v6:xxxx:…". */
 export function ipFamilyOf(ipBlockKey: string): IpFamily {
   return ipBlockKey.startsWith('v6:') ? 'v6' : 'v4';
 }
@@ -120,11 +81,7 @@ export function decideIpBlock(
   };
 }
 
-/**
- * Throttles alarm logs so an attack running at thousands of requests/hour
- * produces a handful of log lines, not thousands: fire on the first send
- * past `threshold`, then every IP_BLOCK_ALARM_EVERY sends after that.
- */
+/** Throttles alarm logs so an attack produces a few lines, not thousands. */
 export function isAlarmTick(sends: number, threshold: number): boolean {
   if (sends <= threshold) return false;
   const past = sends - threshold;

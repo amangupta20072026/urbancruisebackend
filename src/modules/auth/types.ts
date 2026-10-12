@@ -1,22 +1,12 @@
 /**
- * ==============================================================================
- * auth — types (DB rows + DTOs + error codes)
- * ==============================================================================
- * Row shapes here map EXACTLY to the DB — snake_case where the column is
- * snake_case, camelCase where it is (customers table is camelCase). Don't
- * "normalize" — the repository maps DB → domain and the domain flows out
- * as DTOs (below).
- *
- * The AUTH_ERROR map is the SINGLE SOURCE for the `code` field the RN
- * app switches on (see ApiError.code on the client). Add codes here first,
- * then handle them in the client.
- * ==============================================================================
+ * auth types. Row types mirror DB column names exactly (customers is
+ * camelCase, other tables snake_case).
+ * AUTH_ERROR is the source of truth for error codes the app switches on:
+ * add codes here first, then handle them in the app.
  */
 import type { UserRole } from '../../shared/rbac/roles.js';
 
-/* ==============================================================================
- * Error codes surfaced to the client (in ApiError.code)
- * ============================================================================== */
+/* Error codes returned to the app (ApiError.code) */
 
 export const AUTH_ERROR = {
   ACCOUNT_NOT_PROVISIONED: 'account_not_provisioned',
@@ -28,81 +18,52 @@ export const AUTH_ERROR = {
   OTP_INVALID: 'otp_invalid',
   OTP_EXPIRED: 'otp_expired',
   /**
-   * Upstream OTP provider is temporarily unable to deliver messages.
-   * Surfaced with HTTP 503. Causes include:
-   *   - MSG91 wallet balance exhausted (top up)
-   *   - MSG91 circuit breaker open (provider had repeated recent failures)
-   *
-   * Mobile client shows a "try again shortly" screen. This is distinct from
-   * `OTP_SEND_FAILED` (config bug on our side) — the code lets ops-side
-   * alerting distinguish them.
+   * 503: MSG91 can't deliver right now (wallet empty or circuit open).
+   * Distinct from OTP_SEND_FAILED, which is a config error on our side.
    */
   SERVICE_UNAVAILABLE: 'service_unavailable',
   SESSION_REVOKED: 'session_revoked',
-  /**
-   * Emitted by /auth/me when the underlying entity (customer/driver/…) row
-   * has been deleted while the session was live. We also revoke the session
-   * so the client can't keep hitting other endpoints with a dead identity.
-   */
+  /** /auth/me found the account row deleted; the session is revoked too. */
   SESSION_ORPHANED: 'session_orphaned',
   REFRESH_INVALID: 'refresh_invalid',
-  /** New-customer onboarding ticket missing, expired or already used —
-   *  the client must restart from phone entry (request a new OTP). */
+  /** Onboarding ticket missing, expired or used: restart from phone entry. */
   ONBOARDING_EXPIRED: 'onboarding_expired',
-  /** Onboarding ticket presented from a different device than the one
-   *  that verified the OTP. */
+  /** Onboarding ticket used from a different device than the one that verified. */
   ONBOARDING_INVALID: 'onboarding_invalid',
 } as const;
 
-/* ==============================================================================
- * Redis-stored OTP session (JSON in `otp:session:{requestId}`)
- * ============================================================================== */
+/* OTP session (Redis) */
 
 export type OtpSession = {
   requestId: string;
   mobile: string;
   otpHash: string;
   role: UserRole;
-  /**
-   * Delivery channel of the OTP that produced this session.
-   * SMS is the only supported channel today. When email OTP lands, widen
-   * to `'sms' | 'email'` — the value is recorded so verify audit / login
-   * events can attribute the channel used.
-   */
+  /** Delivery channel; only SMS today. */
   channel: 'sms';
   isTest: boolean;
   attempts: number;
   sentAt: number;
   /**
-   * IP block (IPv4 /24 or IPv6 /64 key) charged when this OTP was SENT.
-   * A successful verify is credited to THIS block, not the verify request's
-   * IP — mobile devices often change IP between send and verify. null for
-   * test mobiles / unknown IP. Optional: sessions written before the M4
-   * deploy don't have it (they simply aren't credited).
+   * IP block (IPv4 /24, IPv6 /64) charged at send time. A successful verify
+   * is credited here, since phones often change IP in between. null for test
+   * mobiles or unknown IP; absent on older sessions.
    */
   ipBlock?: string | null;
 };
 
-/* ==============================================================================
- * Resolved user (what phone-lookup returns before mint)
- * ============================================================================== */
+/* Account found by phone lookup */
 
 export type ResolvedUser = {
   role: UserRole;
   entityId: string;
   userId: string;
-  /**
-   * 'active'   — may log in.
-   * 'inactive' — exists but must NOT log in (suspended, left, blocked, or any
-   *              status value not on the allowlist in config/constants.ts).
-   */
+  /** 'inactive' covers any status not in ACTIVE_STATUS_VALUES; such accounts can't log in. */
   status: 'active' | 'inactive';
   requiresProfileSetup: boolean;
 };
 
-/* ==============================================================================
- * Session DB row (auth_sessions)
- * ============================================================================== */
+/* auth_sessions row */
 
 export type AuthSessionRow = {
   id: number;
@@ -124,9 +85,7 @@ export type AuthSessionRow = {
   revoked_reason: string | null;
 };
 
-/* ==============================================================================
- * Wire DTOs
- * ============================================================================== */
+/* Response DTOs */
 
 export type UserProfileDto = {
   id: string;
@@ -137,8 +96,7 @@ export type UserProfileDto = {
   memberSince: string;
 };
 
-/** Session payload returned whenever a login completes (verify for an
- *  existing user, or onboarding for a new customer). */
+/** Returned when a login completes (verify or onboarding). */
 export type AuthenticatedResponseDto = {
   status: 'authenticated';
   accessToken: string;
@@ -150,10 +108,10 @@ export type AuthenticatedResponseDto = {
   profile: UserProfileDto;
 };
 
-/** Returned by verify when the OTP is correct but the number is a NEW
- *  customer. No session exists yet and no customer row has been created:
- *  the client shows the onboarding form and calls
- *  POST /auth/customer/onboard with this token. */
+/**
+ * Verify result for a new customer. No account or session exists yet; the
+ * app calls POST /auth/customer/onboard with this token.
+ */
 export type OnboardingRequiredResponseDto = {
   status: 'onboarding_required';
   onboardingToken: string;
@@ -163,28 +121,21 @@ export type OnboardingRequiredResponseDto = {
 
 export type VerifyOtpResponseDto = AuthenticatedResponseDto | OnboardingRequiredResponseDto;
 
-/** Redis-stored onboarding ticket (value of `auth:onboard:{sha256(token)}`). */
+/** Onboarding ticket stored in Redis under the token's hash. */
 export type OnboardingTicket = {
   mobile: string;
   deviceId: string;
   issuedAt: number;
 };
 
-/** Minimum customer details collected by the onboarding screen. */
+/** Details collected at onboarding. */
 export type CustomerOnboardingDetails = {
   firstName: string;
   lastName: string | null;
   email: string | null;
 };
 
-/**
- * Response for POST /auth/otp/request.
- *
- * `channel` is deliberately kept in the shape (rather than removed) so the
- * shipped mobile app — which reads it — continues to parse the payload
- * unchanged. When email OTP lands, widen the union to `'sms' | 'email'`
- * and set it from the resolved dispatch channel. Do not drop the field.
- */
+/** POST /auth/otp/request response. Keep `channel`: shipped apps read it. */
 export type RequestOtpResponseDto = {
   requestId: string;
   resendAfterSeconds: number;
@@ -197,12 +148,7 @@ export type RefreshResponseDto = {
   refreshToken: string;
 };
 
-/**
- * GET /auth/me — server-authoritative identity for the currently attached
- * session. Same fields as verify's response minus the token pair (the
- * caller already has them). Used by mobile bootstrap to confirm the
- * cached session is still trusted before landing the user on Home.
- */
+/** GET /auth/me: the verify response without tokens. The app checks it at startup. */
 export type MeResponseDto = {
   userId: string;
   role: UserRole;
@@ -211,9 +157,7 @@ export type MeResponseDto = {
   profile: UserProfileDto;
 };
 
-/* ==============================================================================
- * Device metadata sent by client on verify (auth_sessions.device_*)
- * ============================================================================== */
+/* Device sent by the app */
 
 export type DeviceMeta = {
   id: string;
@@ -222,13 +166,7 @@ export type DeviceMeta = {
   appVersion: string;
 };
 
-/**
- * Device as STORED on an auth_sessions row. Every column is nullable: a
- * refresh that carries no device inherits the previous session's values,
- * and those may be empty (rows written before fix H1 held the fake
- * 'unknown-device', which is now stored as null instead). A DeviceMeta is
- * always a valid SessionDevice.
- */
+/** Device as stored on auth_sessions. All nullable: an inherited device may be unknown. */
 export type SessionDevice = {
   id: string | null;
   name: string | null;

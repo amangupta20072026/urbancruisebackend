@@ -1,265 +1,141 @@
 /**
- * ==============================================================================
- * IOtpSessionStore — port for OTP session + rate-limit state
- * ==============================================================================
- * Abstracts every Redis operation the OTP send/verify flow touches so the
- * service layer depends on this interface, not on the concrete ioredis client.
- *
- * SCOPE — three responsibility clusters, all owned by the OTP flow:
- *
- *   1. OTP sessions         — create / load / delete the short-lived session
- *                             object stored during send→verify window.
- *   2. Idempotency          — snapshot / replay a send response so identical
- *                             retries within 24 h get the cached answer.
- *   3. Rate-limit counters  — cooldown, per-mobile windowed counters, anti-
- *                             pumping IP-block and number-prefix buckets.
- *   4. Verify-fail counters — Redis fast counter that mirrors the DB lock
- *                             threshold check so we can fail-fast without a
- *                             DB round-trip on every wrong attempt.
- *   5. JWT deny-list        — revoke an access-token sid so it is rejected
- *                             immediately even before the JWT expires.
- *   6. Active-session index — SADD / SREM / DEL the set that tracks which
- *                             jtis are live for a given (role, entityId).
- *
- * WHY NOT SPLIT FURTHER?
- *   All six clusters share one underlying connection (ioredis) and the same
- *   namespace conventions from redis/keys.ts. Splitting into e.g.
- *   IOtpSessionStore + IRateLimitStore + ISessionIndex would be correct
- *   ISP-wise but would require injecting three objects into every service
- *   function. One composite interface that maps 1-to-1 with the real
- *   infrastructure file is the pragmatic balance for this codebase's size.
- *   If any cluster grows significantly, extract it then.
- *
- * IMPLEMENTATIONS
- *   RedisOtpSessionStore  — wraps the ioredis singleton (production)
- *   InMemoryOtpSessionStore — Map/Set in-process (unit tests, no Redis needed)
- * ==============================================================================
+ * Port for the Redis state used by auth: OTP sessions, idempotency
+ * snapshots, rate-limit counters, verify-failure counters, the JWT
+ * deny-list, the active-session index and onboarding tickets.
+ * Kept as one interface because it maps to one Redis client; split a group
+ * out if it grows. Implementation: RedisOtpSessionStore.
  */
 
 import type { OtpSession, RequestOtpResponseDto, OnboardingTicket } from '../types.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
 
-/** Counters for one IP block's current hourly window (post-increment).
- *  Consumed by service/ip-block-guard.ts (finding M4). */
+/** One IP block's current hourly counters, after increment. Used by ip-block-guard.ts. */
 export type IpBlockWindow = {
   sends: number;
   verifies: number;
   failures: number;
-  /** Seconds until this window expires (≥ 1). Used for Retry-After. */
+  /** Seconds until the window ends (≥ 1), for Retry-After. */
   ttlSeconds: number;
 };
 
-/* --------------------------------------------------------------------------
- * Idempotency snapshot shape — stored as JSON, keyed by idempotency-key.
- * -------------------------------------------------------------------------- */
-
 export type IdempotencySnapshot = {
-  /** sha256('<mobile>|<role>') — binds the snapshot to the exact (mobile, role)
-   *  that produced it so a stolen key can't replay a different identity. */
+  /** sha256('<mobile>|<role>'): a key reused for another mobile or role is rejected. */
   fp: string;
   response: RequestOtpResponseDto;
 };
 
-/* --------------------------------------------------------------------------
- * Interface
- * -------------------------------------------------------------------------- */
-
 export interface IOtpSessionStore {
-  // ── OTP sessions ──────────────────────────────────────────────────────────
+  // OTP sessions
 
-  /**
-   * Persist an OTP session for `ttlSeconds`. The key is the requestId embedded
-   * in the session object — the store derives the Redis key internally.
-   */
+  /** Stores the session under its requestId. */
   setOtpSession(session: OtpSession, ttlSeconds: number): Promise<void>;
 
-  /**
-   * Load an OTP session by requestId. Returns null when not found (expired
-   * or never existed).
-   */
+  /** null if expired or unknown. */
   getOtpSession(requestId: string): Promise<OtpSession | null>;
 
   /**
-   * Delete an OTP session immediately (single-use enforcement after
-   * successful verify) together with its attempt counter.
-   *
-   * Returns true ONLY for the caller whose delete actually removed the
-   * session. Two concurrent verifies with the correct code both reach this
-   * call; exactly one gets `true` and may mint a login session — the other
-   * must be rejected. This is the atomic "claim" of the OTP.
+   * Deletes the session and its attempt counter. Returns true only for the
+   * caller that actually deleted it: of two concurrent correct verifies,
+   * exactly one may log in.
    */
   deleteOtpSession(requestId: string): Promise<boolean>;
 
   /**
-   * ATOMICALLY increment the verify-attempt counter for one OTP session and
-   * return the new value. Called BEFORE the code is compared, so N parallel
-   * guesses receive the values 1..N and only the first OTP_MAX_VERIFY_ATTEMPTS
-   * are ever evaluated. TTL (set on first increment) should match the
-   * session's TTL.
+   * Atomically increments the OTP's attempt count and returns it. Called
+   * before comparing the code, so parallel guesses can't exceed the limit.
    */
   incrementOtpAttempts(requestId: string, ttlSeconds: number): Promise<number>;
 
-  // ── Idempotency ───────────────────────────────────────────────────────────
+  // Idempotency
 
-  /**
-   * Load a previously stored idempotency snapshot. Returns null when the key
-   * is unknown or has expired.
-   */
+  /** null if unknown or expired. */
   getIdempotencySnapshot(idempotencyKey: string): Promise<IdempotencySnapshot | null>;
 
-  /**
-   * Persist an idempotency snapshot for `ttlSeconds`.
-   */
   setIdempotencySnapshot(
     idempotencyKey: string,
     snapshot: IdempotencySnapshot,
     ttlSeconds: number,
   ): Promise<void>;
 
-  // ── Rate-limit counters (per-mobile) ──────────────────────────────────────
-  //
-  // CONCURRENCY CONTRACT — every method below is a single atomic operation.
-  // There are deliberately NO separate "read the counter" methods: a
-  // read-then-write check lets N parallel requests all observe the same
-  // under-cap value and all pass (that was the SMS-bombing race). Callers
-  // must increment FIRST and compare the returned post-increment value.
+  // Rate-limit counters (per-mobile)
+  // Each is one atomic operation. There is deliberately no "read counter"
+  // method: increment first, then compare the returned value.
 
-  /**
-   * Try to start the resend cooldown for `mobile` (Redis: SET NX EX).
-   * Returns true for exactly ONE caller per cooldown window; every concurrent
-   * or subsequent caller gets false until `ttlSeconds` elapse. Stores `nowMs`
-   * so a loser can compute its Retry-After.
-   */
+  /** SET NX EX: true for exactly one caller per window. Stores nowMs for Retry-After. */
   tryAcquireSendCooldown(mobile: string, nowMs: number, ttlSeconds: number): Promise<boolean>;
 
-  /**
-   * Release the cooldown early. Only used when the provider definitively
-   * failed to send, so the user may retry immediately.
-   */
+  /** Ends the cooldown early after a definite provider failure. */
   releaseSendCooldown(mobile: string): Promise<void>;
 
-  /**
-   * Unix-ms timestamp stored by the winning tryAcquireSendCooldown, or null.
-   * Informational only (Retry-After hint) — never used for the allow/deny
-   * decision.
-   */
+  /** Last send time (ms) for Retry-After only; never used to allow or deny. */
   getLastSentAt(mobile: string): Promise<number | null>;
 
-  /**
-   * Atomically increment the 10-minute counter and return the NEW value.
-   * TTL (600 s) is set on first increment, inside the same atomic step.
-   */
+  /** Increments the 10-minute counter; returns the new value. */
   incrementSendCount10m(mobile: string): Promise<number>;
 
-  /**
-   * Atomically increment the daily counter and return the NEW value.
-   * TTL (86 400 s) is set on first increment, inside the same atomic step.
-   */
+  /** Increments the daily counter; returns the new value. */
   incrementSendCountDay(mobile: string): Promise<number>;
 
-  /**
-   * Refund one unit of the per-mobile 10-minute and daily counters (never
-   * below zero). Used only when the provider definitively failed, so a real
-   * user is not locked out by an MSG91 outage they did not cause.
-   */
+  /** Gives back one 10-minute and one daily send (floor 0) after a definite provider failure. */
   refundSendCounts(mobile: string): Promise<void>;
 
-  // ── Rate-limit counters (anti-pumping) ────────────────────────────────────
+  // Rate-limit counters (anti-pumping)
 
-  /**
-   * Atomically count one OTP send against the IP block's hourly window
-   * (IPv4 /24 or IPv6 /64, already bucketed e.g. "v4:203.0.113") and return
-   * the window's POST-increment counters + remaining TTL in one step. The
-   * 3 600 s TTL is set when the window is created. (Finding M4.)
-   */
+  /** Counts a send against the IP block's hourly window; returns its counters and TTL. */
   recordIpBlockSend(ipBlockKey: string): Promise<IpBlockWindow>;
 
-  /**
-   * Credit one successful verification to the block the OTP was SENT from.
-   * Only touches an existing window (never creates one), so it cannot
-   * extend a window's life or create a key without a TTL.
-   */
+  /** Credits a verify to the sending block. Only updates an existing window. */
   recordIpBlockVerify(ipBlockKey: string): Promise<void>;
 
   /**
-   * Record a definitive provider send failure for the block, so an MSG91
-   * outage does not depress the block's conversion rate. Like verify, it
-   * only touches an existing window. The send itself is NOT refunded —
-   * the hard cap still counts it.
+   * Records a provider failure so outages don't lower the block's conversion
+   * rate. The send still counts toward the hard cap. Existing windows only.
    */
   recordIpBlockSendFailure(ipBlockKey: string): Promise<void>;
 
-  /**
-   * Atomically increment the number-prefix hourly counter and return the NEW
-   * value. TTL (3 600 s) is set on first increment.
-   */
+  /** Increments the number-prefix hourly counter; returns the new value. */
   incrementSendCountPrefix(prefix: string): Promise<number>;
 
-  // ── Verify-fail fast counter ──────────────────────────────────────────────
+  // Verify-fail fast counter
 
-  /**
-   * Increment the in-Redis verify-failure counter for a mobile.
-   * Returns the new count. If this is the first increment, the implementation
-   * sets `windowSeconds` as the TTL so the counter expires automatically.
-   */
+  /** Increments the mobile's wrong-code count; the first increment sets the window TTL. */
   incrementVerifyFail(mobile: string, windowSeconds: number): Promise<number>;
 
-  /**
-   * Delete the verify-failure counter (called after successful verify or after
-   * the DB-level lock has been applied).
-   */
+  /** Clears the count after a successful verify or once the lock is applied. */
   deleteVerifyFail(mobile: string): Promise<void>;
 
-  // ── JWT deny-list ─────────────────────────────────────────────────────────
+  // JWT deny-list
 
-  /**
-   * Add a session id to the deny-list. Any access token whose `sid` claim
-   * matches will be rejected by the authenticate middleware.
-   * `ttlSeconds` should equal the remaining lifetime of the access token.
-   */
+  /** Rejects access tokens with this sid. TTL should cover the access token's lifetime. */
   denySession(sid: string, ttlSeconds: number): Promise<void>;
 
-  /**
-   * Check whether a session id is on the deny-list.
-   */
   isSessionDenied(sid: string): Promise<boolean>;
 
-  // ── Active-session index ──────────────────────────────────────────────────
+  // Active-session index
 
   /**
-   * Record a live session for (role, entityId) that ends at `expiresAt`
-   * (pass the same value stored in auth_sessions.expires_at). Atomically
-   * prunes members whose expiry has passed and sets the index's own expiry
-   * to its latest member's, so the index is bounded and self-deleting
-   * (finding L3). Informational only — revocation is driven by the DB.
+   * Adds a session ending at expiresAt (same as auth_sessions.expires_at).
+   * Prunes expired members and expires the key with its last member.
+   * Informational only; revocation uses the DB.
    */
   addActiveSession(role: UserRole, entityId: string, jti: string, expiresAt: Date): Promise<void>;
 
-  /**
-   * Remove a jti from the active-session index (logout / rotation).
-   */
   removeActiveSession(role: UserRole, entityId: string, jti: string): Promise<void>;
 
-  /**
-   * Delete the entire active-session index (logout-all).
-   */
   clearActiveSessions(role: UserRole, entityId: string): Promise<void>;
 
-  /**
-   * Add multiple jtis to the deny-list concurrently (used by logout-all and
-   * token-reuse detection to revoke every active access token at once).
-   */
+  /** Deny-lists many sessions at once (logout-all, token reuse). */
   denyManySessions(jtis: string[], ttlSeconds: number): Promise<void>;
 
-  // ── Customer onboarding tickets ───────────────────────────────────────────
+  // Customer onboarding tickets
 
-  /** Store a ticket under sha256(token). */
+  /** Stores a ticket under sha256(token). */
   setOnboardingTicket(
     tokenHash: string,
     ticket: OnboardingTicket,
     ttlSeconds: number,
   ): Promise<void>;
 
-  /** Atomically read AND delete the ticket (single use). null when missing/expired. */
+  /** Atomically reads and deletes the ticket (single use). null if missing or expired. */
   takeOnboardingTicket(tokenHash: string): Promise<OnboardingTicket | null>;
 }

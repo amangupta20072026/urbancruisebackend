@@ -1,48 +1,7 @@
 /**
- * ==============================================================================
- * auth.service — session lifecycle (refresh, logout, /me)
- * ==============================================================================
- * All three functions operate on auth_sessions rows plus the session store's
- * deny-list that gives us real-time revocation on top of JWTs' inherent
- * statelessness.
- *
- * PUSH TOKENS (audit fix #7): whenever a device or a whole account is signed
- * out — logout, logout-all, forced revoke, refresh-token reuse — the matching
- * push tokens are deleted too, so a signed-out phone stops receiving that
- * account's notifications. Cleanup is best-effort and never blocks sign-out.
- *
- * DEVICE ON REFRESH (fix H1):
- *   The rotated session must keep pointing at the REAL phone, because
- *   logout deletes push tokens by the session's device_id. The device sent
- *   by the app is used when present; otherwise it is copied from the
- *   previous session row. The old code stored a fake 'unknown-device'
- *   instead, so logout deleted nothing and the signed-out phone kept
- *   receiving the account's notifications. See resolveRefreshDevice().
- *
- * ROLE GATE ON REFRESH (fix H2):
- *   A session whose role has been switched off (ENABLED_ROLES) cannot be
- *   refreshed — 403 ROLE_NOT_ENABLED. The check runs AFTER the token is
- *   proven genuine (reuse detection + hash match keep their security
- *   behaviour) and the session is NOT revoked: switching the role back on
- *   lets it continue within JWT_REFRESH_TTL.
- *
- * DUPLICATE REFRESH GRACE (fix M2):
- *   When the app fires two refreshes with the same token (two API calls hit
- *   401 together), the second one used to look like token theft and revoke
- *   EVERY session on EVERY device. Now a token rotated by a normal refresh
- *   within REFRESH_REUSE_GRACE_SECONDS, whose replacement is still active,
- *   gets a fresh SIBLING session (previous_jti = the same old jti) after the
- *   same hash / role / account / phone checks as a normal refresh. The same
- *   applies to the loser of a truly simultaneous race in rotateSession.
- *   Outside the window — or once the replacement was logged out/revoked —
- *   reuse detection still revokes everything. See isWithinRotationGrace().
- *
- * DESIGN CHANGE (DIP fix):
- *   Accepts AuthServiceDeps instead of importing the concrete redis /
- *   repo singletons. All infrastructure access goes through:
- *     deps.store  — IOtpSessionStore  (was: import { redis })
- *     deps.repo   — IAuthRepository   (was: import * as repo)
- * ==============================================================================
+ * Session lifecycle: refresh, logout and /me. Access tokens are revoked
+ * instantly through the Redis deny-list. Every sign-out also deletes the
+ * device's (or account's) push tokens, best-effort.
  */
 import { ENV } from '../../../config/env.js';
 import { safeEqual } from '../../../shared/utils/crypto.js';
@@ -66,25 +25,15 @@ import type { UserRole } from '../../../shared/rbac/roles.js';
 import type { AuthServiceDeps } from '../infrastructure/AuthContainer.js';
 import type { RevokeReason } from '../ports/IAuthRepository.js';
 
-/* ==============================================================================
- * REFRESH
- * ============================================================================== */
+/* Refresh */
 
-/**
- * The placeholder the pre-H1 controller wrote on every refreshed session.
- * Rows that still carry it are treated as "device unknown" (null) so the
- * fake value stops propagating; the next refresh that sends a device heals
- * the chain.
- */
+/** Placeholder written by older builds; treated as an unknown (null) device. */
 export const LEGACY_PLACEHOLDER_DEVICE_ID = 'unknown-device';
 
 /**
- * Which device the rotated session should record (fix H1).
- *   1. The device the app sent with this refresh — current and authoritative
- *      (it also picks up a newer appVersion after an app update).
- *   2. Otherwise the previous session's device, copied as-is.
- *   3. A previous device that is the legacy placeholder becomes all-null.
- * Never invents a device.
+ * Device for the rotated session: the one sent with this refresh, else the
+ * previous session's (legacy placeholder becomes null). Never invented,
+ * because logout uses it to remove the right push token.
  */
 export function resolveRefreshDevice(
   sent: DeviceMeta | null,
@@ -105,25 +54,24 @@ export function resolveRefreshDevice(
 export async function refreshSession(
   deps: AuthServiceDeps,
   refreshTokenStr: string,
-  /** Device sent with this refresh; null when the app did not send one. */
+  /** Device sent with this refresh, or null. */
   sentDevice: DeviceMeta | null,
   ip: string | null,
   userAgent: string | null,
 ): Promise<RefreshResponseDto> {
   const { store, repo } = deps;
-  const claims = verifyRefreshToken(refreshTokenStr); // throws AuthError on bad token
+  const claims = verifyRefreshToken(refreshTokenStr); // throws AuthError
 
   const row = await repo.findSessionByJti(claims.jti);
   if (!row) {
     throw new AuthError('Session not found.', AUTH_ERROR.SESSION_REVOKED);
   }
 
-  // 'rotate' = normal refresh. 'grace' = duplicate of a refresh that just
-  // happened (fix M2): a sibling session is created instead of a rotation.
+  // 'grace': duplicate of a refresh that just happened; gets a sibling session.
   let mode: 'rotate' | 'grace' = 'rotate';
 
-  // Reuse detection — revoked jti presented → nuclear: revoke all for entity,
-  // UNLESS it is the app's own duplicate inside the grace window (fix M2).
+  // A revoked token means possible theft: revoke every session for the
+  // account, unless it's the app's own duplicate within the grace window.
   if (
     row.revoked_at !== null &&
     (await repo.isWithinRotationGrace(claims.jti, REFRESH_REUSE_GRACE_SECONDS))
@@ -142,7 +90,7 @@ export async function refreshSession(
     throw new AuthError('Session has been revoked.', AUTH_ERROR.SESSION_REVOKED);
   }
 
-  // Verify hash matches + token belongs to this session's user
+  // Token must match the stored hash and belong to this session's user.
   if (
     !safeEqual(hashForStorage(refreshTokenStr), row.refresh_token_hash) ||
     String(claims.sub) !== String(row.entity_id)
@@ -150,12 +98,11 @@ export async function refreshSession(
     throw new AuthError('Refresh token invalid.', AUTH_ERROR.REFRESH_INVALID);
   }
 
-  // Role gate (fix H2) — the session's role must still be enabled.
+  // Role must still be enabled. The session isn't revoked, so re-enabling resumes it.
   assertRoleEnabled(deps.enabledRoles, row.role);
 
-  // Re-validate the account on every refresh. The web app shares this DB, so
-  // a staff member marked 'left', a vendor deactivated, or a deleted row must
-  // lose mobile access at the next refresh — not 30 days later.
+  // Re-check the account every refresh: changes made in the web app (status,
+  // deletion) take effect now, not when the refresh token expires.
   const status = await repo.getAccountStatus(row.role, row.entity_id);
   if (status !== 'active') {
     await revokeEverything(deps, row.role, row.entity_id, 'admin_force');
@@ -172,12 +119,8 @@ export async function refreshSession(
     );
   }
 
-  // Re-bind to the phone that started this session (audit fix #11).
-  // Before this, refresh never re-checked WHO the phone belongs to: a vendor
-  // whose login phone was changed, or a staff member whose number was
-  // reassigned, kept access for the full 30-day refresh TTL.
-  // Re-running the login lookup on every refresh fixes this. Tokens issued
-  // before `mob` existed skip this and age out within JWT_REFRESH_TTL.
+  // The login phone must still belong to this account (e.g. not reassigned).
+  // Older tokens without `mob` skip this and expire naturally.
   if (claims.mob) {
     const current = await repo.findUserByPhone(row.role, claims.mob);
     if (!current || current.entityId !== row.entity_id) {
@@ -193,7 +136,7 @@ export async function refreshSession(
     }
   }
 
-  // Rotate: new jti + tokens (carrying the phone binding forward)
+  // Rotate, carrying the phone binding forward.
   const newJti = newId();
   const newRefresh = signRefreshToken({
     sub: claims.sub as string,
@@ -224,9 +167,8 @@ export async function refreshSession(
   if (mode === 'rotate') {
     const rotated = await repo.rotateSession(claims.jti, next);
     if (!rotated) {
-      // A concurrent refresh with the same token won the race a moment ago
-      // (fix M2): within the grace window this request gets a sibling session
-      // too, instead of a 401 that could log the app out.
+      // Lost the race to a concurrent refresh. Within the grace window, give
+      // this request a sibling session rather than a 401 that logs the app out.
       if (!(await repo.isWithinRotationGrace(claims.jti, REFRESH_REUSE_GRACE_SECONDS))) {
         throw new AuthError('Refresh already in progress.', AUTH_ERROR.REFRESH_INVALID);
       }
@@ -250,9 +192,7 @@ export async function refreshSession(
   return { accessToken: newAccess, refreshToken: newRefresh };
 }
 
-/* ==============================================================================
- * LOGOUT
- * ============================================================================== */
+/* Logout */
 
 export type LogoutParams = {
   identityRole: UserRole;
@@ -279,8 +219,7 @@ export async function logout(deps: AuthServiceDeps, p: LogoutParams): Promise<vo
     return;
   }
 
-  // Read the session's device BEFORE revoking, so we know which device's
-  // push token to drop.
+  // Read the device before revoking, to know which push token to drop.
   const current = await repo.findSessionByJti(p.identitySessionId);
   await repo.markSessionRevoked(p.identitySessionId, 'logout');
   await Promise.all([
@@ -292,9 +231,7 @@ export async function logout(deps: AuthServiceDeps, p: LogoutParams): Promise<vo
   ]);
 }
 
-/* ==============================================================================
- * GET IDENTITY (/auth/me)
- * ============================================================================== */
+/* GET /auth/me */
 
 export type GetMeParams = {
   identityUserId: string;
@@ -343,10 +280,7 @@ export async function getMe(deps: AuthServiceDeps, p: GetMeParams): Promise<MeRe
   };
 }
 
-/* ==============================================================================
- * revokeEverything — DB revoke + deny-list every live access token + clear
- * the active-session index for one account.
- * ============================================================================== */
+/** Revokes every session of an account: DB rows, deny-list and the active index. */
 async function revokeEverything(
   deps: AuthServiceDeps,
   role: UserRole,
@@ -365,13 +299,10 @@ async function revokeEverything(
   ]);
 }
 
-/* ==============================================================================
- * endSingleSession — revoke ONE session chain (not the whole account).
- * ==============================================================================
- * Used when the phone that started a session no longer belongs to the
- * account. The account itself is fine — e.g. a vendor's owner and other
- * managers log in with their own phones — so only this chain ends.
- * ============================================================================== */
+/**
+ * Ends one session chain, not the whole account. Used when the session's
+ * login phone no longer belongs to the account.
+ */
 async function endSingleSession(
   deps: AuthServiceDeps,
   row: AuthSessionRow,
@@ -388,13 +319,10 @@ async function endSingleSession(
   ]);
 }
 
-/* ==============================================================================
- * clearPushTokens — best-effort push-token removal on sign-out
- * ==============================================================================
- * Never throws: a failed cleanup must not turn a successful logout or a
- * security revoke into an error response. The token-claiming upsert in the
- * notifications module is the backstop if a delete is ever missed.
- * ============================================================================== */
+/**
+ * Removes push tokens on sign-out. Never throws, so it can't fail a logout or
+ * revoke; token claiming in notifications is the backstop.
+ */
 async function clearPushTokens(
   deps: AuthServiceDeps,
   role: UserRole,

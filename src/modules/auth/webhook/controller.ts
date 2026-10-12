@@ -1,27 +1,8 @@
 /**
- * ==============================================================================
- * auth.webhook — MSG91 DLR receiver
- * ==============================================================================
- * POST /webhooks/msg91/:token/delivery
- *
- * MSG91 posts a delivery report to this URL after each SMS reaches (or fails
- * to reach) the handset. The `:token` in the path is a shared secret; only
- * MSG91's portal knows the URL, so possession authenticates the caller.
- *
- * WHY THIS ENDPOINT ALWAYS RETURNS 200 (except for wrong token):
- *   MSG91 retries any non-2xx response — for hours. If we 4xx a payload
- *   whose shape we don't recognise, or 5xx on a transient DB blip, MSG91
- *   floods us with retries and the queue backs up. Instead we log-and-ack:
- *   parse defensively, apply what we understood, always 200. Auditors read
- *   the logs; MSG91 keeps moving.
- *
- * A wrong `:token` DOES return 401 — that is not MSG91 talking to us, it is
- * an attacker probing. No retry storm concern.
- *
- * DESIGN NOTE (DIP):
- *   Uses authDeps.repo to call applyDlr so the webhook shares the same
- *   injectable repository as the rest of the auth module.
- * ==============================================================================
+ * MSG91 delivery-report (DLR) receiver.
+ * Always answers 200 once the token is valid: MSG91 retries any non-2xx for
+ * hours, so unknown shapes and DB errors are logged, not rejected.
+ * A wrong token gets 401; that's a probe, not MSG91.
  */
 import type { NextFunction, Request, Response } from 'express';
 import { logger } from '../../../shared/logger/index.js';
@@ -30,11 +11,7 @@ import { authDeps } from '../infrastructure/AuthContainer.js';
 
 type TokenParams = { token: string };
 
-/**
- * Step 1 — authenticate via the URL-embedded shared secret (timing-safe
- * compare). A separate middleware so it runs BEFORE the body is parsed
- * (see webhook/routes.ts): a bad token never costs us a body parse.
- */
+/** Checks the URL token (timing-safe). Runs before body parsing. */
 export function requireMsg91Token(
   req: Request<TokenParams>,
   res: Response,
@@ -51,9 +28,8 @@ export function requireMsg91Token(
   next();
 }
 
-/** Step 2+ — runs only after requireMsg91Token and the body parsers. */
+/** Applies each delivery report to its otp_events row. */
 export async function postMsg91Dlr(req: Request<TokenParams>, res: Response): Promise<Response> {
-  // 2. Parse whatever shape MSG91 sent.
   const records = parseDlrPayload(req.body);
 
   if (records.length === 0) {
@@ -64,7 +40,7 @@ export async function postMsg91Dlr(req: Request<TokenParams>, res: Response): Pr
     return res.status(200).json({ ok: true, applied: 0 });
   }
 
-  // 3. Apply each DLR. Errors on a single row must NOT block the rest.
+  // One failing row must not block the rest.
   let applied = 0;
   let skipped = 0;
   let errored = 0;
@@ -99,10 +75,6 @@ export async function postMsg91Dlr(req: Request<TokenParams>, res: Response): Pr
 
   return res.status(200).json({ ok: true, received: records.length, applied, skipped });
 }
-
-/* -----------------------------------------------------------------
- * Helpers
- * ----------------------------------------------------------------- */
 
 function safeKeys(v: unknown): string[] {
   if (v === null || typeof v !== 'object') return [];

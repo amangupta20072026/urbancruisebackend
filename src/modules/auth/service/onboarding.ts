@@ -1,24 +1,6 @@
 /**
- * ==============================================================================
- * auth.service — completeCustomerOnboarding
- * ==============================================================================
- * Orchestrates POST /auth/customer/onboard — the ONLY place a customer row is
- * created from the mobile app.
- *
- *   0. Customer role enabled on this environment? (fix H2) — checked BEFORE
- *      the ticket is consumed, so switching the role back on lets the same
- *      ticket be used within its lifetime.
- *   1. Consume the onboarding ticket (atomic read+delete → single use).
- *      Missing / expired / already used → 401 ONBOARDING_EXPIRED.
- *   2. The ticket must come from the same device that verified the OTP.
- *   3. Re-check admin block on the number.
- *   4. createCustomerIfAbsent — per-mobile lock + re-check, so a double
- *      submit or a CRM row created in the meantime never makes a duplicate.
- *   5. Mint the session and return { status: 'authenticated' }.
- *
- * Proof of phone ownership is the ticket itself: it is only ever issued by
- * verifyOtp after a correct OTP for that exact mobile.
- * ==============================================================================
+ * POST /auth/customer/onboard: the only place the app creates a customer.
+ * The single-use ticket from verifyOtp is the proof of phone ownership.
  */
 import { sha256 } from '../../../shared/utils/crypto.js';
 import { AuthError, ForbiddenError } from '../../../shared/errors/index.js';
@@ -42,12 +24,12 @@ export async function completeCustomerOnboarding(
   deps: AuthServiceDeps,
   p: CompleteOnboardingParams,
 ): Promise<AuthenticatedResponseDto> {
-  // 0. Role gate (fix H2).
+  // Before consuming the ticket, so it stays usable if the role is re-enabled.
   assertRoleEnabled(deps.enabledRoles, 'customer');
 
   const { store, repo } = deps;
 
-  // 1. Single-use ticket
+  // Atomic read + delete. Missing, expired or used → ONBOARDING_EXPIRED.
   const ticket = await store.takeOnboardingTicket(sha256(p.onboardingToken));
   if (!ticket) {
     throw new AuthError(
@@ -56,7 +38,7 @@ export async function completeCustomerOnboarding(
     );
   }
 
-  // 2. Same device
+  // Must be the device that verified the OTP.
   if (ticket.deviceId !== p.device.id) {
     logger.warn(
       { alarm: 'onboarding_device_mismatch', mobile: maskMobile(ticket.mobile) },
@@ -68,20 +50,19 @@ export async function completeCustomerOnboarding(
     );
   }
 
-  // 3. Admin block may have been applied after the OTP was verified
+  // The number may have been blocked since the OTP was verified.
   const flags = await repo.getMobileFlags(ticket.mobile);
   if (flags?.admin_blocked === 1) {
     throw new ForbiddenError('This number cannot use the service.', AUTH_ERROR.MOBILE_BLOCKED);
   }
 
-  // 4. Create (duplicate-safe)
+  // Duplicate-safe: returns an existing row instead of inserting.
   const { user, created } = await repo.createCustomerIfAbsent(ticket.mobile, p.details);
   logger.info(
     { mobile: maskMobile(ticket.mobile), customerId: user.entityId, created },
     created ? 'customer onboarded' : 'onboarding hit an existing customer — logged in instead',
   );
 
-  // 5. Session
   return mintAuthenticatedSession(deps, user, {
     mobile: ticket.mobile,
     device: p.device,

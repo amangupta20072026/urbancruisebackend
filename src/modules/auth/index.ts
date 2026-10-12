@@ -1,13 +1,7 @@
 /**
- * ==============================================================================
- * auth module — public mount
- * ==============================================================================
- * Exposes two routers:
- *   - default.mount() → the user-facing auth API (/api/v1/auth/*)
- *   - mountWebhooks() → provider callbacks (/webhooks/msg91/*). Kept off the
- *     versioned API prefix because MSG91 configures this URL once in their
- *     dashboard; the URL must remain stable across API version bumps.
- * ==============================================================================
+ * auth module. mount() serves /api/v1/auth; mountWebhooks() serves the
+ * MSG91 callbacks at /webhooks, outside the versioned prefix so the URL
+ * configured in MSG91 never changes.
  */
 import { Router } from 'express';
 import routes from './routes.js';

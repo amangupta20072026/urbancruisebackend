@@ -1,16 +1,6 @@
 /**
- * ==============================================================================
- * auth.repository — vendor user resolution + profile loading
- * ==============================================================================
- * Handles the `vendors` table:
- *   • findVendorByPhone        — phone lookup on `vendors.phone` ONLY
- *   • loadVendorProfile        — profile DTO for /verify response
- *   • loadVendorIdentityDetails — profile + requiresProfileSetup for /me
- *                                 returns null when the row has vanished
- *
- * Vendors log in with `vendors.phone` only. `owner_phone`, `manager_phone1`
- * and `manager_phone2` are NOT login numbers. There is no vendor sub-role.
- * ==============================================================================
+ * auth repository: vendors. Login uses vendors.phone only; owner and
+ * manager phones are not login numbers.
  */
 import type { RowDataPacket } from 'mysql2/promise';
 import { pool } from '../../../shared/db/pool.js';
@@ -24,9 +14,7 @@ import {
 } from './users-shared.js';
 import { VENDOR_NULL_STATUS_IS_ACTIVE } from '../../../config/constants.js';
 
-/* --------------------------------------------------------------------------
- * DB row shapes
- * -------------------------------------------------------------------------- */
+/* DB rows */
 type VendorRow = RowDataPacket & {
   id: number;
   phone: string | null;
@@ -42,9 +30,7 @@ type VendorProfileRow = RowDataPacket & {
   created_at: Date | null;
 };
 
-/* --------------------------------------------------------------------------
- * Phone lookup — `vendors.phone` only
- * -------------------------------------------------------------------------- */
+/* Phone lookup (vendors.phone only) */
 export async function findVendorByPhone(mobile: string): Promise<ResolvedUser | null> {
   const fmts = candidateFormats(mobile);
   const [rows] = await pool.execute<VendorRow[]>(
@@ -66,14 +52,11 @@ export async function findVendorByPhone(mobile: string): Promise<ResolvedUser | 
   };
 }
 
-/* --------------------------------------------------------------------------
- * Status by id — used on refresh and /me so a vendor deactivated in the web
- * app loses access at the next token refresh.
- *
- * Unlike customers / drivers / UC staff, this does NOT consult
- * mobile_registry.admin_blocked. To cut off a vendor, set vendors.status;
- * a blocked phone is still refused at its next OTP login.
- * -------------------------------------------------------------------------- */
+/*
+ * Status by id (refresh, /me). Unlike other roles this ignores
+ * mobile_registry.admin_blocked: cut off a vendor via vendors.status.
+ * A blocked phone is still refused at the next OTP login.
+ */
 export async function getVendorStatusById(id: string): Promise<ResolvedUser['status'] | null> {
   const [rows] = await pool.execute<RowDataPacket[]>(
     'SELECT id, status FROM vendors WHERE id = ? LIMIT 1',
@@ -85,9 +68,7 @@ export async function getVendorStatusById(id: string): Promise<ResolvedUser['sta
   });
 }
 
-/* --------------------------------------------------------------------------
- * Profile loaders
- * -------------------------------------------------------------------------- */
+/* Profile loaders */
 export async function loadVendorProfile(id: string): Promise<UserProfileDto> {
   const [rows] = await pool.execute<VendorProfileRow[]>(
     `SELECT id, name, email, phone, owner_name, created_at

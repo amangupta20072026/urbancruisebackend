@@ -1,8 +1,4 @@
-/**
- * customer.payments — repository
- * DB table: `dsrs`
- * Tenant scope: customer_id column (ADR-0003).
- */
+/** customer.payments repository (`dsrs`). Every query filters by customer_id. */
 import type { RowDataPacket } from 'mysql2/promise';
 import { pool } from '../../../shared/db/pool.js';
 import type { CustomerPaymentListItem, CustomerPaymentDetail } from './types.js';

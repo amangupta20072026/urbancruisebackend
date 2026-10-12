@@ -1,48 +1,11 @@
 /**
- * ==============================================================================
- * auth.service — verifyOtp
- * ==============================================================================
- * Orchestrates POST /auth/otp/verify.
+ * POST /auth/otp/verify. The order of checks matters; see the step comments.
+ * Vendor, driver and uc accounts are never created here. A new customer
+ * gets a single-use onboarding ticket and nothing is written to customers.
  *
- * ORDER OF CHECKS (keep this order):
- *   0. Role enabled on this environment? (fix H2) — an OTP sent while the
- *      role was enabled cannot be redeemed after it is switched off.
- *   1. Mobile blocked / locked?
- *   2. Load OTP session by requestId; it must belong to this mobile + role.
- *   2b. ATOMICALLY count this attempt against the OTP (INCR) BEFORE
- *       comparing. Over OTP_MAX_VERIFY_ATTEMPTS → session burned, reject.
- *       (Audit fix #2: the old flow read the lock, compared, and only then
- *       counted — 200 parallel guesses were ALL evaluated.)
- *   3. Compare HMAC(otp) in constant time.
- *        wrong → windowed fail counter; crossing the threshold locks the
- *                number for VERIFY_LOCK_DURATION_SECONDS.
- *   4. Correct → atomically claim the session (DEL returns 1 for exactly one
- *      caller). A concurrent duplicate verify gets OTP_EXPIRED, so one OTP
- *      can never mint two login sessions.
- *   5. Resolve the account for the requested role:
- *        Vendor / UC / Driver  — must exist AND be active, else 403.
- *                                Never created here.
- *        Customer, exists      — log in.
- *        Customer, new         — NOTHING is written to `customers`. Issue a
- *                                single-use onboarding ticket and return
- *                                { status: 'onboarding_required' }. The row
- *                                is created by POST /auth/customer/onboard.
- *   6. Mint the session (shared helper) and return { status: 'authenticated' }.
- *
- * IP-BLOCK CONVERSION (finding M4):
- *   A successful claim credits one verify to the IP block the OTP was SENT
- *   from (stored on the session). That conversion signal is what lets busy
- *   carrier-CGNAT networks past the per-network soft cap while SMS-pumping
- *   ranges — whose OTPs are never typed in — stay blocked.
- *
- * LOCKOUT VISIBILITY (finding M3 — accepted trade-off, now monitored):
- *   The brute-force lock protects the NUMBER, so anyone who knows a number
- *   can lock it on purpose (request an OTP, type 5 wrong codes). That is
- *   accepted — removing the lock would allow code guessing — but it must be
- *   visible: the locking failure logs `alarm: 'otp_number_locked'` and its
- *   otp_events row carries msg 'number_locked'. Existing sessions are not
- *   affected by the lock; only new logins are refused while it lasts.
- * ==============================================================================
+ * Five wrong codes lock the number for 15 minutes. Anyone who knows a
+ * number can trigger this on purpose; that's accepted (it prevents
+ * guessing) and alarmed as otp_number_locked. Existing sessions keep working.
  */
 import { randomBytes } from 'node:crypto';
 import {
@@ -81,13 +44,13 @@ export async function verifyOtp(
   deps: AuthServiceDeps,
   p: VerifyOtpParams,
 ): Promise<VerifyOtpResponseDto> {
-  // 0. Role gate (fix H2).
+  // 0. Role enabled? An OTP sent before the role was disabled can't be used.
   assertRoleEnabled(deps.enabledRoles, p.role);
 
   const { store, repo } = deps;
   const mobile = normalizeMobile(p.phone, p.countryCode);
 
-  // 1. Mobile blocked / locked?
+  // 1. Admin block or brute-force lock.
   const flags = await repo.getMobileFlags(mobile);
   if (flags?.admin_blocked === 1) {
     throw new ForbiddenError('This number cannot use the service.', AUTH_ERROR.MOBILE_BLOCKED);
@@ -101,7 +64,7 @@ export async function verifyOtp(
     );
   }
 
-  // 2. Load session
+  // 2. Session must exist and match this mobile and role.
   if (!p.requestId) {
     throw new AuthError('Missing OTP session — request a new code.', AUTH_ERROR.OTP_EXPIRED);
   }
@@ -113,9 +76,8 @@ export async function verifyOtp(
     throw new AuthError('That code doesn\u2019t match.', AUTH_ERROR.OTP_INVALID);
   }
 
-  // 2b. Count this attempt atomically BEFORE comparing. Parallel guesses get
-  //     distinct values 1..N from the store, so at most OTP_MAX_VERIFY_ATTEMPTS
-  //     of them are ever compared, regardless of concurrency.
+  // 2b. Count the attempt atomically before comparing, so parallel guesses
+  //     can't exceed OTP_MAX_VERIFY_ATTEMPTS.
   const attempt = await store.incrementOtpAttempts(p.requestId, OTP_SESSION_TTL_SECONDS);
   if (attempt > OTP_MAX_VERIFY_ATTEMPTS) {
     await store.deleteOtpSession(p.requestId);
@@ -132,11 +94,10 @@ export async function verifyOtp(
     );
   }
 
-  // 3. Compare
+  // 3. Constant-time compare.
   if (!safeEqual(hashOtp(p.requestId, p.otp), session.otpHash)) {
-    // The Redis counter is windowed (expires VERIFY_FAIL_WINDOW_SECONDS after
-    // the first failure) and is the authority for locking. The DB counter is
-    // kept for visibility in mobile_registry and is reset when a lock is set.
+    // The windowed Redis counter decides the lock; the DB counter is for
+    // visibility and resets when a lock is set.
     const fails = await store.incrementVerifyFail(mobile, VERIFY_FAIL_WINDOW_SECONDS);
     await repo.incrementVerifyFailure(mobile);
     const locking = fails >= VERIFY_FAIL_LOCK_THRESHOLD;
@@ -145,9 +106,8 @@ export async function verifyOtp(
       const captchaUntil = new Date(Date.now() + 60 * 60 * 1000);
       await repo.lockMobile(mobile, until, captchaUntil);
       await store.deleteVerifyFail(mobile);
-      await store.deleteOtpSession(p.requestId); // a locked number needs a fresh OTP
-      // M3: make deliberate lockouts visible. Repeated alarms for one number
-      // (or one IP locking many numbers) means someone is doing it on purpose.
+      await store.deleteOtpSession(p.requestId); // needs a fresh OTP after the lock
+      // Repeated alarms for one number, or one IP locking many, suggest abuse.
       logger.warn(
         {
           alarm: 'otp_number_locked',
@@ -169,8 +129,8 @@ export async function verifyOtp(
     throw new AuthError('That code doesn\u2019t match.', AUTH_ERROR.OTP_INVALID);
   }
 
-  // 4. Single-use — atomic claim. Only the caller whose delete removed the
-  //    session may continue; a concurrent duplicate gets OTP_EXPIRED.
+  // 4. Atomic claim: one OTP can create only one session. A concurrent
+  //    duplicate gets OTP_EXPIRED.
   const claimed = await store.deleteOtpSession(p.requestId);
   if (!claimed) {
     throw new AuthError('This OTP has already been used.', AUTH_ERROR.OTP_EXPIRED);
@@ -182,7 +142,7 @@ export async function verifyOtp(
     creditIpBlockVerify(store, session.ipBlock, session.isTest),
   ]);
 
-  // 5. Resolve account
+  // 5. Resolve the account.
   const user = await repo.findUserByPhone(p.role, mobile);
 
   if (!user) {
@@ -203,7 +163,7 @@ export async function verifyOtp(
       );
     }
 
-    // New customer → onboarding ticket, no DB write.
+    // New customer: onboarding ticket, no DB write.
     const onboardingToken = randomBytes(32).toString('base64url');
     await store.setOnboardingTicket(
       sha256(onboardingToken),
@@ -234,7 +194,7 @@ export async function verifyOtp(
     );
   }
 
-  // 6. Mint
+  // 6. Start the session.
   return mintAuthenticatedSession(deps, user, {
     mobile,
     device: p.device,
@@ -244,9 +204,8 @@ export async function verifyOtp(
 }
 
 /**
- * Best-effort: a Redis hiccup here must never fail a login that has already
- * been verified. Worst case the block's conversion reads slightly low.
- * Test mobiles are never charged to a block, so never credited either.
+ * Credits the verify to the IP block the OTP was sent from. Best-effort:
+ * must never fail a verified login. Test mobiles have no block.
  */
 async function creditIpBlockVerify(
   store: AuthServiceDeps['store'],

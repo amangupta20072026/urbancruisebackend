@@ -1,31 +1,21 @@
 /**
- * ==============================================================================
- * ICaptchaVerifier — port for CAPTCHA token verification
- * ==============================================================================
- * Used by sendOtp to enforce the post-lockout CAPTCHA gate (audit fix #10):
- * after a number trips the OTP brute-force lock, mobile_registry marks it
- * `captcha_required_until`, and while that window is open /otp/request must
- * carry a valid CAPTCHA token.
- *
- * IMPLEMENTATIONS
- *   HCaptchaVerifier         — calls hCaptcha's siteverify API (production)
- *   DisabledCaptchaVerifier  — gate OFF (HCAPTCHA_SECRET not configured)
- *   tests                    — any object implementing this interface
- * ==============================================================================
+ * Port for CAPTCHA verification. While a number is in its post-lockout
+ * window (mobile_registry.captcha_required_until), /otp/request needs a
+ * valid token. Implementations: HCaptchaVerifier, DisabledCaptchaVerifier.
  */
 
 export type CaptchaVerdict =
   /** Token is valid. */
   | { ok: true }
-  /** Token was rejected by the provider (wrong, expired, reused, wrong site). */
+  /** Rejected (wrong, expired, reused, or for another site). */
   | { ok: false; reason: 'invalid'; providerCodes: string[] }
-  /** The provider could not be reached / answered garbage. */
+  /** Provider unreachable or gave an unusable answer. */
   | { ok: false; reason: 'unavailable' };
 
 export interface ICaptchaVerifier {
-  /** False when the gate is switched off (no secret configured). */
+  /** False when no secret is configured (gate off). */
   readonly enabled: boolean;
 
-  /** Verify one token. Never throws — every outcome is returned as data. */
+  /** Never throws; every outcome is returned as a verdict. */
   verify(token: string, remoteIp: string | null): Promise<CaptchaVerdict>;
 }

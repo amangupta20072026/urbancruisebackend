@@ -1,33 +1,12 @@
 /**
- * ==============================================================================
- * auth.repository — user resolution + profile loading (dispatcher)
- * ==============================================================================
- * This file is now a THIN DISPATCHER. All SQL and per-role logic lives in the
- * four role-specific files below. This file only:
- *   1. Re-exports the per-role finders/loaders so existing callers that import
- *      directly from `users.ts` continue to work unchanged.
- *   2. Implements `findUserByPhone`, `loadProfile`, and `loadIdentityDetails`
- *      as switch-on-role dispatchers — the only logic here is routing.
- *
- * ROLE FILES
- *   users-customers.ts  — customers table
- *   users-vendors.ts    — vendors table (login by `phone` only)
- *   users-drivers.ts    — drivers table
- *   users-uc-staff.ts   — uc_staff table
- *   users-shared.ts     — candidateFormats, normStatus, normalisePhoneToE164,
- *                         joinName, placeholder (shared helpers)
- *
- * ADDING A NEW ROLE
- *   1. Create `users-<role>.ts` with findXByPhone / loadXProfile / loadXIdentityDetails.
- *   2. Add a case to each switch below.
- *   3. Re-export the finder/loader from this file.
- *   No changes needed in service files, ports, or tests.
- * ==============================================================================
+ * auth repository: per-role dispatch for user lookup and profiles. SQL lives
+ * in users-<role>.ts. To add a role, create that file and add a case to
+ * each switch here.
  */
 import type { ResolvedUser, UserProfileDto } from '../types.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
 
-// ── Per-role implementations ────────────────────────────────────────────────
+// Per-role implementations
 
 export {
   findCustomerByPhone,
@@ -55,7 +34,7 @@ export {
   loadUcStaffIdentityDetails,
 } from './users-uc-staff.js';
 
-// ── Role-agnostic imports for dispatchers ───────────────────────────────────
+// Used by the dispatchers
 
 import {
   findCustomerByPhone,
@@ -82,9 +61,7 @@ import {
   loadUcStaffIdentityDetails,
 } from './users-uc-staff.js';
 
-/* ==============================================================================
- * Dispatchers — used by MysqlAuthRepository (IAuthRepository implementation)
- * ============================================================================== */
+/* Dispatchers, used by MysqlAuthRepository */
 
 export async function findUserByPhone(
   role: UserRole,
@@ -131,11 +108,7 @@ export async function loadIdentityDetails(
   }
 }
 
-/**
- * Current login status of an already-known account (by tenant id).
- * Returns null when the row no longer exists. Used on refresh and /me so
- * accounts disabled from the web app lose mobile access promptly.
- */
+/** Account status by id; null if the row is gone. Checked on refresh and /me. */
 export async function getAccountStatus(
   role: UserRole,
   entityId: string,

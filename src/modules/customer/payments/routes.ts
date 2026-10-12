@@ -1,24 +1,9 @@
 /**
- * customer.payments — routes
+ * customer.payments routes, mounted at /api/v1/customer/payments.
  *
- * Mounted at /api/v1/customer/payments in app.ts (step-2).
- *
- * Routes:
- *   GET /api/v1/customer/payments/:id/receipt
- *       → Streams a PDF receipt for a paid payment.
- *         Secured: authenticate + authorize('read', 'Payment').
- *         Rate-limited PER CUSTOMER (audit fix #13): rendering a PDF is
- *         CPU-heavy and blocks the event loop, so one account hammering this
- *         endpoint could slow the API for everyone. The limit is keyed by
- *         the authenticated account (not IP) and shared across PM2 workers.
- *
- * KEY FALLBACK (fix — ERR_ERL_KEY_GEN_IPV6):
- *   The limiter runs after `authenticate`, so `req.identity` is always set
- *   and the key is `<role>:<entityId>`. If that ever changes, the fallback
- *   is the client IP from clientIpKey(), which groups an IPv6 address with
- *   its /64 block (IPV6_RATE_LIMIT_SUBNET). A raw `req.ip` would let one IPv6 user
- *   rotate addresses inside their block and bypass the limit — that is what
- *   express-rate-limit's ERR_ERL_KEY_GEN_IPV6 check warns about.
+ * GET /:id/receipt — PDF receipt for a paid payment. PDF rendering is
+ * CPU-heavy and blocks the event loop, so it has a per-account limit
+ * shared across PM2 workers.
  */
 import { Router } from 'express';
 import { authenticate } from '../../../shared/http/middleware/authenticate.js';
@@ -30,14 +15,14 @@ import { getPaymentReceipt } from './controller.js';
 
 const router = Router();
 
-/** 10 receipts per minute per account — plenty for a human, a wall for a script. */
+/** 10 receipts per minute per account. */
 const receiptLimiter = createRateLimiter({
   name: 'customer-receipt',
   windowMs: 60_000,
   limit: 10,
   message: 'Too many receipt downloads. Please wait a minute and try again.',
-  // Runs after authenticate, so the identity is always present here. The
-  // IP fallback goes through clientIpKey() (IPv6 → /64) just in case.
+  // Keyed by account (set by authenticate). The fallback uses clientIpKey()
+  // so IPv6 clients are grouped by /64 and can't rotate around the limit.
   keyGenerator: req =>
     req.identity ? `${req.identity.role}:${req.identity.entityId}` : `anon:${clientIpKey(req)}`,
 });

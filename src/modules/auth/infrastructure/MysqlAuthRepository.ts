@@ -1,17 +1,6 @@
 /**
- * ==============================================================================
- * MysqlAuthRepository — production IAuthRepository backed by mysql2
- * ==============================================================================
- * Delegates every method to the existing repository functions. This class is
- * purely a thin adapter — zero business logic, zero new SQL. Existing
- * repository files (users.ts, sessions.ts, audit.ts, mobile-registry.ts)
- * stay unchanged; this class is the bridge that lets the service layer depend
- * on an interface instead of on the concrete module exports.
- *
- * When the repository files are eventually split per-table (per the SRP audit
- * recommendation), only this file changes — the service files and their tests
- * are untouched.
- * ==============================================================================
+ * IAuthRepository backed by MySQL. A thin adapter over the functions in
+ * ../repository; no logic or SQL of its own.
  */
 
 import type { IAuthRepository } from '../ports/IAuthRepository.js';
@@ -26,8 +15,6 @@ import type { OtpEventInsert, LoginEventInsert, DlrUpdate } from '../repository/
 import type { CreateSessionInput, RevokeReason } from '../repository/sessions.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
 
-// Existing repository functions — imported individually so the adapter stays
-// explicit about every dependency it bridges.
 import {
   getMobileFlags,
   touchMobileRegistry,
@@ -57,7 +44,7 @@ import { insertOtpEvent, insertLoginEvent, applyDlr } from '../repository/audit.
 import { deletePushTokens } from '../repository/push-tokens.js';
 
 export class MysqlAuthRepository implements IAuthRepository {
-  // ── mobile_registry ─────────────────────────────────────────────────────
+  // mobile_registry
 
   getMobileFlags(mobile: string): Promise<MobileFlags | null> {
     return getMobileFlags(mobile);
@@ -79,7 +66,7 @@ export class MysqlAuthRepository implements IAuthRepository {
     return resetVerifyFailure(mobile);
   }
 
-  // ── users ────────────────────────────────────────────────────────────────
+  // users
 
   findUserByPhone(role: UserRole, mobile: string): Promise<ResolvedUser | null> {
     return findUserByPhone(role, mobile);
@@ -96,7 +83,7 @@ export class MysqlAuthRepository implements IAuthRepository {
     return getAccountStatus(role, entityId);
   }
 
-  // ── profiles ─────────────────────────────────────────────────────────────
+  // profiles
 
   loadProfile(role: UserRole, entityId: string): Promise<UserProfileDto> {
     return loadProfile(role, entityId);
@@ -109,7 +96,7 @@ export class MysqlAuthRepository implements IAuthRepository {
     return loadIdentityDetails(role, entityId);
   }
 
-  // ── sessions ─────────────────────────────────────────────────────────────
+  // sessions
 
   createSession(input: CreateSessionInput): Promise<void> {
     return createSession(input);
@@ -135,13 +122,13 @@ export class MysqlAuthRepository implements IAuthRepository {
     return isWithinRotationGrace(oldJti, graceSeconds);
   }
 
-  // ── push tokens ──────────────────────────────────────────────────────────
+  // push tokens
 
   deletePushTokens(role: UserRole, entityId: string, deviceId: string | null): Promise<void> {
     return deletePushTokens(role, entityId, deviceId);
   }
 
-  // ── audit ────────────────────────────────────────────────────────────────
+  // audit
 
   insertOtpEvent(e: OtpEventInsert): Promise<void> {
     return insertOtpEvent(e);

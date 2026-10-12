@@ -1,18 +1,10 @@
 /**
- * ==============================================================================
- * notifications — routes
- * ==============================================================================
- * All routes require authentication (authenticate middleware).
- * The authorize() middleware enforces the coarse RBAC check — all roles can
- * read and manage their own notifications.
- *
- * Route list:
- *   POST   /notifications/tokens            — register FCM token (login/cold-start)
- *   DELETE /notifications/tokens/:deviceId  — unregister (logout)
- *   GET    /notifications                   — inbox list (paginated)
- *   POST   /notifications/read-all          — mark all read
- *   POST   /notifications/:id/read          — mark one read
- * ==============================================================================
+ * notifications routes, mounted at /api/v1/notifications. All require a session.
+ *   POST   /tokens            register FCM token (login, cold start)
+ *   DELETE /tokens/:deviceId  unregister (logout)
+ *   GET    /                  inbox, paginated
+ *   POST   /read-all          mark all read
+ *   POST   /:id/read          mark one read
  */
 import { Router } from 'express';
 import { validate } from '../../shared/http/middleware/validate.js';
@@ -34,28 +26,18 @@ import {
 
 const router = Router();
 
-// All notification routes require a valid session.
 router.use(authenticate);
 
-/**
- * POST /tokens — upsert FCM registration token
- * No authorize() needed beyond authenticate — a user can only register a
- * token for themselves (entityId comes from the JWT, not the request body).
- */
+// Token routes need no authorize(): entityId comes from the JWT, so callers
+// can only manage their own tokens.
 router.post('/tokens', validate({ body: RegisterTokenBody }), postRegisterToken);
 
-/**
- * DELETE /tokens/:deviceId — remove FCM registration token
- */
 router.delete(
   '/tokens/:deviceId',
   validate({ params: UnregisterTokenParams }),
   deleteUnregisterToken,
 );
 
-/**
- * GET / — notification inbox
- */
 router.get(
   '/',
   authorize('read', 'Notification'),
@@ -63,14 +45,9 @@ router.get(
   getNotifications,
 );
 
-/**
- * POST /read-all — must come BEFORE /:id/read to avoid the wildcard match
- */
+// Must be registered before /:id/read.
 router.post('/read-all', authorize('read', 'Notification'), postMarkAllRead);
 
-/**
- * POST /:id/read — mark single notification read
- */
 router.post(
   '/:id/read',
   authorize('read', 'Notification'),

@@ -7,12 +7,22 @@ import type { ApiResponse, PageMeta, Paginated } from '../types/api.js';
 import { ForbiddenError } from '../errors/index.js';
 import type { Identity } from '../types/identity.js';
 
+/**
+ * Returns a 200 OK response with the given data in the standard envelope.
+ * @param res The Express response object.
+ * @param data The data to send in the response body.
+ */
 export function ok<T>(res: Response, data: T): Response {
   const req = res.req as Request;
   const body: ApiResponse<T> = { data, requestId: String(req.id) };
   return res.status(200).json(body);
 }
 
+/**
+ * Returns a 201 Created response with the given data in the standard envelope.
+ * @param res The Express response object.
+ * @param data The data to send in the response body.
+ */
 export function created<T>(res: Response, data: T): Response {
   const req = res.req as Request;
   const body: ApiResponse<T> = { data, requestId: String(req.id) };

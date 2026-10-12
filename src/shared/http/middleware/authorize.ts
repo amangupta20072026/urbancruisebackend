@@ -9,6 +9,12 @@ import { can } from '../../rbac/policies.js';
 import type { Action } from '../../rbac/actions.js';
 import type { Subject } from '../../rbac/subjects.js';
 
+/**
+ * Express middleware that checks the authenticated user's role against the
+ * given action and subject. Use after authenticate.
+ * @param action The action to check (e.g. 'read', 'create', 'delete').
+ * @param subject The subject to check (e.g. 'booking', 'user').
+ */
 export function authorize(action: Action, subject: Subject): RequestHandler {
   return (req, _res, next) => {
     if (!req.identity) throw new ForbiddenError('Not authenticated.', 'AUTH_UNAUTHENTICATED');

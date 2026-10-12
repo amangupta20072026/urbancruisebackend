@@ -21,6 +21,10 @@ import configModule from './modules/config/index.js';
 import customerModule from './modules/customer/index.js';
 import notificationsModule from './modules/notifications/index.js';
 
+/** Builds the Express app. Middleware order is intentional — keep it:
+ * security → request id/context/logging → webhooks → body parsers →
+ * rate limit → routes → 404 → error handler.
+ */
 export function buildApp(): Express {
   const app = express();
 
@@ -41,12 +45,16 @@ export function buildApp(): Express {
   // their URL token, then parse with a larger limit, and MSG91 sends bursts.
   app.use('/webhooks', authWebhooks());
 
+  // Body parsers for all other routes. The global limit is small to avoid
+  // DoS attacks. Each module may have its own larger limit for file uploads.
   app.use(express.json({ limit: JSON_BODY_LIMIT }));
   app.use(express.urlencoded({ extended: true, limit: URLENCODED_BODY_LIMIT }));
 
-  // Global limit; some routes add stricter limiters on top.
+  // Global rate limit goes before the modules, so it applies to all routes. Each
+  // module may also have its own stricter limit for sensitive endpoints.
   app.use(globalRateLimit);
 
+  // Mount the modules. Each module mounts its own routes and middleware.
   app.use('/', healthModule.mount());
   app.use('/api/v1/auth', authModule.mount());
   app.use('/api/v1/config', configModule.mount());
@@ -55,9 +63,10 @@ export function buildApp(): Express {
 
   // TODO: mount the vendor, driver, uc and support modules once implemented.
 
+  // 404 handler last: it catches requests that didn't match any route.
   app.use(notFound);
 
-  // Must be registered last.
+  // Error handler last: it catches errors from all previous middleware and routes.
   app.use(errorHandler);
 
   return app;

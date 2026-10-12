@@ -63,6 +63,7 @@ class SelfHealingRedisStore extends RedisStore {
   }
 }
 
+/** Creates a new RedisStore with the given prefix. Each limiter must have a unique name so its counters don't collide. */
 function createStore(name: string): RedisStore {
   return new SelfHealingRedisStore({
     sendCommand: (command: string, ...args: string[]) =>
@@ -117,6 +118,7 @@ export type RateLimiterOptions = {
 
 const registeredNames = new Set<string>();
 
+/** Creates a new rate limiter with the given options. Each limiter must have a unique name so its counters don't collide. */
 export function createRateLimiter(o: RateLimiterOptions): RateLimitRequestHandler {
   if (registeredNames.has(o.name)) {
     // Shared names would share counters, so fail at startup.

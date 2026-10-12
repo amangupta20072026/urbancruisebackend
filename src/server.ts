@@ -11,12 +11,14 @@
  */
 import http from 'node:http';
 import type { Express } from 'express';
+
 import { ENV } from './config/env.js';
 import {
   HTTP_CONNECTIONS_CHECK_INTERVAL_MS,
   SHUTDOWN_KILL_MARGIN_MS,
   SHUTDOWN_TIMEOUT_MS,
 } from './config/constants.js';
+
 import { logger } from './shared/logger/index.js';
 import { closePool } from './shared/db/pool.js';
 import { closeRedis } from './shared/redis/client.js';
@@ -44,6 +46,10 @@ function checkPm2KillTimeout(): void {
   }
 }
 
+/** Creates and starts the HTTP server, and sets up graceful shutdown.
+ * @param app Express app to serve
+ * @returns the created server
+ */
 export function createServer(app: Express): http.Server {
   checkPm2KillTimeout();
   // Short check interval so the timeouts below fire on time.
@@ -97,6 +103,8 @@ export function createServer(app: Express): http.Server {
     process.exit(exitCode);
   };
 
+  // SIGTERM is sent by PM2 when stopping a worker, and by Kubernetes when
+  // shutting down a pod. SIGINT is sent by Ctrl+C in a terminal.
   process.on('SIGTERM', () => void shutdown('SIGTERM', 0));
   process.on('SIGINT', () => void shutdown('SIGINT', 0));
 

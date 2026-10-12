@@ -10,6 +10,11 @@ import type { UserRole } from '../rbac/roles.js';
 // expiresIn without undefined, for exactOptionalPropertyTypes.
 type Duration = NonNullable<SignOptions['expiresIn']>;
 
+/**
+ * Access token claims: user id, role, entity id and session id. The session id
+ * is the auth_sessions jti. Logout adds it to the Redis deny-list so this access
+ * token stops working immediately.
+ */
 export type AccessTokenClaims = JwtPayload & {
   sub: string; // user id
   role: UserRole;
@@ -19,6 +24,12 @@ export type AccessTokenClaims = JwtPayload & {
   sid: string;
 };
 
+/**
+ * Refresh token claims: user id, session id and optional mobile number. The
+ * session id is the auth_sessions jti. Logout revokes the session so this
+ * refresh token stops working immediately. The mobile number is kept across
+ * rotations so refresh can check the number still belongs to this user.
+ */
 export type RefreshTokenClaims = JwtPayload & {
   sub: string; // user id
   jti: string; // auth_sessions row id
@@ -30,6 +41,10 @@ export type RefreshTokenClaims = JwtPayload & {
   mob?: string;
 };
 
+/**
+ * Signs an access token with the given claims. The claims must not include iat,
+ * exp, iss or aud; those are added automatically.
+ */
 export function signAccessToken(
   claims: Omit<AccessTokenClaims, 'iat' | 'exp' | 'iss' | 'aud'>,
 ): string {
@@ -38,6 +53,10 @@ export function signAccessToken(
   });
 }
 
+/**
+ * Signs a refresh token with the given claims. The claims must not include iat,
+ * exp, iss or aud; those are added automatically.
+ */
 export function signRefreshToken(
   claims: Omit<RefreshTokenClaims, 'iat' | 'exp' | 'iss' | 'aud'>,
 ): string {
@@ -46,6 +65,10 @@ export function signRefreshToken(
   });
 }
 
+/**
+ * Verifies an access token and returns its claims. Throws AuthError (401) if the
+ * token is invalid or expired.
+ */
 export function verifyAccessToken(token: string): AccessTokenClaims {
   try {
     return jwt.verify(token, ENV.JWT_ACCESS_SECRET, { algorithms: ['HS256'] }) as AccessTokenClaims;
@@ -56,6 +79,10 @@ export function verifyAccessToken(token: string): AccessTokenClaims {
   }
 }
 
+/**
+ * Verifies a refresh token and returns its claims. Throws AuthError (401) if the
+ * token is invalid or expired.
+ */
 export function verifyRefreshToken(token: string): RefreshTokenClaims {
   try {
     return jwt.verify(token, ENV.JWT_REFRESH_SECRET, {

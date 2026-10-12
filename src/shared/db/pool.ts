@@ -7,6 +7,8 @@ import mysql, { type Pool } from 'mysql2/promise';
 import { ENV } from '../../config/env.js';
 import { logger } from '../logger/index.js';
 
+/** The single MySQL pool for the process. Always import this one; extra pools
+ * multiply connections toward MySQL's max_connections. */
 export const pool: Pool = mysql.createPool({
   host: ENV.DB_HOST,
   port: ENV.DB_PORT,

@@ -1,3 +1,7 @@
+/**
+ * This file re-exports all the error classes in this directory so they can be
+ * imported from a single place.
+ */
 export { AppError } from './AppError.js';
 export { AuthError } from './AuthError.js';
 export { ForbiddenError } from './ForbiddenError.js';

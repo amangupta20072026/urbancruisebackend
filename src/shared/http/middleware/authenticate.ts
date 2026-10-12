@@ -14,6 +14,11 @@ import { jwtDeny } from '../../redis/keys.js';
 
 const BEARER_PREFIX = 'Bearer ';
 
+/**
+ * Express middleware that verifies the Bearer access token and sets req.identity.
+ * Rejects revoked sessions (401) and roles not enabled on this environment (403).
+ * Public routes simply don't use this middleware.
+ */
 export const authenticate: RequestHandler = async (req, _res, next) => {
   const header = req.header(HEADER_AUTHORIZATION);
   if (!header || !header.startsWith(BEARER_PREFIX)) {

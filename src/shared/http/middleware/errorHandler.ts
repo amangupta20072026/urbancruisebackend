@@ -52,6 +52,11 @@ function normaliseBodyParserError(err: unknown): unknown {
   }
 }
 
+/**
+ * Express error-handling middleware that turns any error into a standard JSON
+ * envelope. AppError uses its own status and code; anything else is a 500 whose
+ * details are hidden in production. 5xx and bugs log at error, 4xx at warn.
+ */
 export const errorHandler: ErrorRequestHandler = (rawErr, req, res, _next) => {
   const err = normaliseBodyParserError(rawErr);
   const isAppError = err instanceof AppError;

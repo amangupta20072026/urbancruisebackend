@@ -72,6 +72,8 @@ export type AuthSessionRow = {
   entity_id: string;
   refresh_token_hash: string;
   previous_jti: string | null;
+  /** NULL only on rows written before the family_id migration. */
+  family_id: string | null;
   device_id: string | null;
   device_name: string | null;
   platform: 'ios' | 'android' | null;

@@ -15,6 +15,12 @@ export type CreateSessionInput = {
   entityId: string;
   refreshTokenHash: string;
   previousJti: string | null;
+  /**
+   * Login family: the jti of the login that started this chain. A login
+   * passes its own jti; every refresh (rotation or grace sibling) inherits
+   * the parent's. Logout of one device revokes the whole family.
+   */
+  familyId: string;
   /** Nullable on refresh (see SessionDevice); login always passes a full device. */
   device: SessionDevice;
   ip: string | null;
@@ -30,16 +36,17 @@ export async function createSession(
   // sub_role is legacy; always NULL.
   await runner.execute(
     `INSERT INTO auth_sessions
-       (jti, role, entity_id, sub_role, refresh_token_hash, previous_jti,
+       (jti, role, entity_id, sub_role, refresh_token_hash, previous_jti, family_id,
         device_id, device_name, platform, app_version, ip, user_agent,
         issued_at, expires_at)
-     VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, INET6_ATON(?), ?, NOW(), ?)`,
+     VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, INET6_ATON(?), ?, NOW(), ?)`,
     [
       input.jti,
       input.role,
       input.entityId,
       input.refreshTokenHash,
       input.previousJti,
+      input.familyId,
       input.device.id,
       input.device.name,
       input.device.platform,
@@ -53,7 +60,7 @@ export async function createSession(
 
 export async function findSessionByJti(jti: string): Promise<AuthSessionRow | null> {
   const [rows] = await pool.execute<RowDataPacket[]>(
-    `SELECT id, jti, role, entity_id, refresh_token_hash, previous_jti,
+    `SELECT id, jti, role, entity_id, refresh_token_hash, previous_jti, family_id,
             device_id, device_name, platform, app_version, ip, user_agent,
             issued_at, last_used_at, expires_at, revoked_at, revoked_reason
        FROM auth_sessions WHERE jti = ? LIMIT 1`,
@@ -127,6 +134,64 @@ export async function rotateSession(oldJti: string, next: CreateSessionInput): P
       [oldJti],
     );
     if (res.affectedRows !== 1) return false;
+    await createSession(next, conn);
+    return true;
+  });
+}
+
+/** A session ended by revokeFamily: its jti, plus the device for push-token cleanup. */
+export type RevokedSession = { jti: string; deviceId: string | null };
+
+/**
+ * Revokes every active session in one login family and returns them.
+ *
+ * Runs in a transaction with SELECT ... FOR UPDATE on (family_id, revoked_at),
+ * so it serialises with createGraceSibling: a sibling is either committed
+ * before this runs (and is revoked here) or sees the family already revoked
+ * (and is never created).
+ */
+export async function revokeFamily(
+  role: UserRole,
+  entityId: string,
+  familyId: string,
+  reason: RevokeReason,
+): Promise<RevokedSession[]> {
+  return withTransaction(async conn => {
+    const [rows] = await conn.execute<RowDataPacket[]>(
+      `SELECT jti, device_id FROM auth_sessions
+        WHERE family_id = ? AND role = ? AND entity_id = ? AND revoked_at IS NULL
+        FOR UPDATE`,
+      [familyId, role, entityId],
+    );
+    if (rows.length === 0) return [];
+    await conn.execute(
+      `UPDATE auth_sessions
+          SET revoked_at = NOW(), revoked_reason = ?
+        WHERE family_id = ? AND role = ? AND entity_id = ? AND revoked_at IS NULL`,
+      [reason, familyId, role, entityId],
+    );
+    return rows.map(r => ({
+      jti: String(r['jti']),
+      deviceId: (r['device_id'] as string | null) ?? null,
+    }));
+  });
+}
+
+/**
+ * Inserts a grace-window sibling only if its family still has an active
+ * session. Locks the family's active rows first (see revokeFamily), so a
+ * concurrent logout can never leave a freshly minted sibling behind.
+ * Returns false if the family was already revoked.
+ */
+export async function createGraceSibling(next: CreateSessionInput): Promise<boolean> {
+  return withTransaction(async conn => {
+    const [rows] = await conn.execute<RowDataPacket[]>(
+      `SELECT id FROM auth_sessions
+        WHERE family_id = ? AND role = ? AND entity_id = ? AND revoked_at IS NULL
+        FOR UPDATE`,
+      [next.familyId, next.role, next.entityId],
+    );
+    if (rows.length === 0) return false;
     await createSession(next, conn);
     return true;
   });

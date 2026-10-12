@@ -43,6 +43,7 @@ export async function mintAuthenticatedSession(
     entityId: user.entityId,
     refreshTokenHash: hashForStorage(refresh),
     previousJti: null,
+    familyId: jti, // a login starts a new family
     device: ctx.device,
     ip: ctx.ip,
     userAgent: ctx.userAgent,

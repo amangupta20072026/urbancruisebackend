@@ -12,7 +12,7 @@ import type {
   CustomerOnboardingDetails,
 } from '../types.js';
 import type { OtpEventInsert, LoginEventInsert, DlrUpdate } from '../repository/audit.js';
-import type { CreateSessionInput, RevokeReason } from '../repository/sessions.js';
+import type { CreateSessionInput, RevokeReason, RevokedSession } from '../repository/sessions.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
 
 import {
@@ -38,6 +38,8 @@ import {
   revokeAllForEntity,
   rotateSession,
   isWithinRotationGrace,
+  revokeFamily,
+  createGraceSibling,
 } from '../repository/sessions.js';
 
 import { insertOtpEvent, insertLoginEvent, applyDlr } from '../repository/audit.js';
@@ -120,6 +122,19 @@ export class MysqlAuthRepository implements IAuthRepository {
 
   isWithinRotationGrace(oldJti: string, graceSeconds: number): Promise<boolean> {
     return isWithinRotationGrace(oldJti, graceSeconds);
+  }
+
+  revokeFamily(
+    role: UserRole,
+    entityId: string,
+    familyId: string,
+    reason: RevokeReason,
+  ): Promise<RevokedSession[]> {
+    return revokeFamily(role, entityId, familyId, reason);
+  }
+
+  createGraceSibling(next: CreateSessionInput): Promise<boolean> {
+    return createGraceSibling(next);
   }
 
   // push tokens

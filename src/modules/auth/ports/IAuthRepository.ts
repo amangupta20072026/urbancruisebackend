@@ -10,7 +10,7 @@ import type {
   AuthSessionRow,
   CustomerOnboardingDetails,
 } from '../types.js';
-import type { CreateSessionInput, RevokeReason } from '../repository/sessions.js';
+import type { CreateSessionInput, RevokeReason, RevokedSession } from '../repository/sessions.js';
 import type { OtpEventInsert, LoginEventInsert, DlrUpdate } from '../repository/audit.js';
 import type { UserRole } from '../../../shared/rbac/roles.js';
 
@@ -63,6 +63,15 @@ export interface IAuthRepository {
    * replacement is still active: a duplicate refresh, not token theft.
    */
   isWithinRotationGrace(oldJti: string, graceSeconds: number): Promise<boolean>;
+  /** Revokes every active session in a login family (atomically). */
+  revokeFamily(
+    role: UserRole,
+    entityId: string,
+    familyId: string,
+    reason: RevokeReason,
+  ): Promise<RevokedSession[]>;
+  /** Inserts a grace sibling only if its family is still active. */
+  createGraceSibling(next: CreateSessionInput): Promise<boolean>;
 
   // push tokens
 

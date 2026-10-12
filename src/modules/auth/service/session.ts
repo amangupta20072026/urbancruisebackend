@@ -124,7 +124,7 @@ export async function refreshSession(
   if (claims.mob) {
     const current = await repo.findUserByPhone(row.role, claims.mob);
     if (!current || current.entityId !== row.entity_id) {
-      await endSingleSession(deps, row, claims.jti);
+      await endFamily(deps, row.role, row.entity_id, claims.jti, 'admin_force');
       logger.warn(
         { role: row.role, entityId: row.entity_id, jti: claims.jti },
         'refresh rejected — the phone that started this session is no longer linked to the account',
@@ -158,6 +158,10 @@ export async function refreshSession(
     entityId: row.entity_id,
     refreshTokenHash: newHash,
     previousJti: claims.jti,
+    // Inherit the login family. Rows from before the migration have no
+    // family_id; their own jti then starts one, which still groups every
+    // sibling created from this same token.
+    familyId: row.family_id ?? row.jti,
     device: resolveRefreshDevice(sentDevice, row),
     ip,
     userAgent,
@@ -176,7 +180,10 @@ export async function refreshSession(
     }
   }
   if (mode === 'grace') {
-    await repo.createSession(next);
+    // Atomic with logout: if the family was revoked meanwhile, refuse.
+    if (!(await repo.createGraceSibling(next))) {
+      throw new AuthError('Session has been revoked.', AUTH_ERROR.SESSION_REVOKED);
+    }
     logger.info(
       { role: row.role, entityId: row.entity_id, oldJti: claims.jti, newJti },
       'refresh: duplicate within grace window — sibling session issued (not treated as reuse)',
@@ -219,16 +226,10 @@ export async function logout(deps: AuthServiceDeps, p: LogoutParams): Promise<vo
     return;
   }
 
-  // Read the device before revoking, to know which push token to drop.
-  const current = await repo.findSessionByJti(p.identitySessionId);
-  await repo.markSessionRevoked(p.identitySessionId, 'logout');
-  await Promise.all([
-    store.removeActiveSession(p.identityRole, p.identityEntityId, p.identitySessionId),
-    store.denySession(p.identitySessionId, accessTtl),
-    current?.device_id
-      ? clearPushTokens(deps, p.identityRole, p.identityEntityId, current.device_id)
-      : Promise.resolve(),
-  ]);
+  // Revoke the whole login family, not just this jti: a duplicate refresh
+  // inside the grace window creates a sibling session that would otherwise
+  // survive this logout.
+  await endFamily(deps, p.identityRole, p.identityEntityId, p.identitySessionId, 'logout');
 }
 
 /* GET /auth/me */
@@ -300,22 +301,40 @@ async function revokeEverything(
 }
 
 /**
- * Ends one session chain, not the whole account. Used when the session's
- * login phone no longer belongs to the account.
+ * Ends one login family (this device's session chain, including any grace
+ * siblings), not the whole account. Used for "log out this device" and when
+ * the session's login phone no longer belongs to the account.
  */
-async function endSingleSession(
+async function endFamily(
   deps: AuthServiceDeps,
-  row: AuthSessionRow,
-  jti: string,
+  role: UserRole,
+  entityId: string,
+  sid: string,
+  reason: RevokeReason,
 ): Promise<void> {
   const { store, repo } = deps;
-  await repo.markSessionRevoked(jti, 'admin_force');
+  const current = await repo.findSessionByJti(sid);
+  // Pre-migration rows have no family_id; fall back to the session itself.
+  const familyId = current?.family_id ?? sid;
+  const revoked = await repo.revokeFamily(role, entityId, familyId, reason);
+
+  // Always end the caller's own sid, even if it was not in the family result
+  // (already revoked, or a pre-migration row whose family_id is NULL).
+  const jtis = new Set(revoked.map(r => r.jti));
+  if (!jtis.has(sid)) {
+    await repo.markSessionRevoked(sid, reason);
+    jtis.add(sid);
+  }
+
+  const deviceIds = new Set<string>();
+  for (const r of revoked) if (r.deviceId) deviceIds.add(r.deviceId);
+  if (current?.device_id) deviceIds.add(current.device_id);
+
+  const accessTtl = ttlToSeconds(ENV.JWT_ACCESS_TTL);
   await Promise.all([
-    store.removeActiveSession(row.role, row.entity_id, jti),
-    store.denySession(jti, ttlToSeconds(ENV.JWT_ACCESS_TTL)),
-    row.device_id
-      ? clearPushTokens(deps, row.role, row.entity_id, row.device_id)
-      : Promise.resolve(),
+    store.denyManySessions([...jtis], accessTtl),
+    ...[...jtis].map(j => store.removeActiveSession(role, entityId, j)),
+    ...[...deviceIds].map(d => clearPushTokens(deps, role, entityId, d)),
   ]);
 }
 

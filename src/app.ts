@@ -1,25 +1,7 @@
 /**
- * ==============================================================================
- * buildApp — Express instance + middleware pipeline (ORDER MATTERS)
- * ==============================================================================
- * Every step of the pipeline is intentional. Adding middleware later — put it
- * in the RIGHT position or something silently breaks. The order is:
- *
- *   1. Security         — Helmet, x-powered-by off, trust proxy
- *   2. requestId        — attach req.id (used by everyone downstream)
- *   3. requestContext   — AsyncLocalStorage store (id + identity available anywhere)
- *   4. httpLogger       — 1 structured log line per request, includes req.id
- *   5. CORS             — before body parsers so preflight is fast
- *   5b. Webhooks        — mounted before the global body parsers; the route
- *                          verifies its URL token FIRST, then parses with its
- *                          own 1 MB limit. Every other route keeps 100 KB.
- *   6. Body parsers     — express.json / express.urlencoded (v5 built-in)
- *   7. Rate limit       — after body parsers so we don't block valid low-cost 405s
- *                          but before route handlers so buckets are respected
- *   8. Modules          — health, then business modules
- *   9. notFound         — catch-all 404
- *  10. errorHandler     — final AppError → HTTP envelope
- * ==============================================================================
+ * Builds the Express app. Middleware order is intentional — keep it:
+ * security → request id/context/logging → webhooks → body parsers →
+ * rate limit → routes → 404 → error handler.
  */
 import express, { type Express } from 'express';
 
@@ -33,7 +15,6 @@ import { globalRateLimit } from './shared/http/middleware/rateLimit.js';
 import { notFound } from './shared/http/middleware/notFound.js';
 import { errorHandler } from './shared/http/middleware/errorHandler.js';
 
-// Modules
 import healthModule from './modules/health/index.js';
 import authModule, { mountWebhooks as authWebhooks } from './modules/auth/index.js';
 import configModule from './modules/config/index.js';
@@ -43,60 +24,40 @@ import notificationsModule from './modules/notifications/index.js';
 export function buildApp(): Express {
   const app = express();
 
-  // 1. App-level security settings
+  // Disable x-powered-by and set trust proxy.
   applySecurity(app);
 
-  // 2-4. Request-scoped infra (id → context → log)
+  // Request id first: the context and logger both use it.
   app.use(requestId);
   app.use(requestContext);
   app.use(httpLogger);
 
-  // Security middleware runs early so headers are always set even on 4xx.
+  // Helmet headers, set early so error responses get them too.
   app.use(securityMiddleware);
 
-  // 5. CORS is currently not required as the API is consumed exclusively by native mobile clients.
-  // Enable CORS when browser-based/web clients are supported.
+  // CORS is not enabled: the API is used only by native mobile apps.
 
-  //  app.use(corsMiddleware);
-
-  // 5b/7a. Provider webhooks — mounted BEFORE the global body parsers (they
-  //     bring their own, larger limit) and BEFORE the global rate limit because
-  //     MSG91 delivery reports arrive in bursts (one per SMS the platform
-  //     just handled) and getting throttled here means losing delivery
-  //     visibility. Authentication for these routes is the URL-embedded
-  //     shared secret checked inside each webhook handler; no session
-  //     applies.
-  //     The webhook router parses its own body (WEBHOOK_BODY_LIMIT) only AFTER
-  //     the URL token is verified, so an unauthenticated caller never gets
-  //     the larger allowance. Unmatched /webhooks/* paths fall through to the
-  //     strict global parsers below.
+  // Webhooks go before the global body parsers and rate limit: they verify
+  // their URL token, then parse with a larger limit, and MSG91 sends bursts.
   app.use('/webhooks', authWebhooks());
 
-  // 6. Body parsers (Express 5 built-in) — strict limit for every other route.
   app.use(express.json({ limit: JSON_BODY_LIMIT }));
   app.use(express.urlencoded({ extended: true, limit: URLENCODED_BODY_LIMIT }));
 
-  // 7b. Global rate limit (per-route limiters can layer on top)
+  // Global limit; some routes add stricter limiters on top.
   app.use(globalRateLimit);
 
-  // 8. Modules
-  //    Every module exports `mount(): Router`. Base paths are decided here.
-  app.use('/', healthModule.mount()); // /health + /ready
+  app.use('/', healthModule.mount());
   app.use('/api/v1/auth', authModule.mount());
-  app.use('/api/v1/config', configModule.mount()); // /config/app (public — pre-login)
-  app.use('/api/v1/customer', customerModule.mount()); // receipts + (step-2) full customer API
+  app.use('/api/v1/config', configModule.mount());
+  app.use('/api/v1/customer', customerModule.mount());
   app.use('/api/v1/notifications', notificationsModule.mount());
 
-  // TODO(step-2): mount remaining business modules
-  // app.use('/api/v1/vendor',        vendorModule.mount());
-  // app.use('/api/v1/driver',        driverModule.mount());
-  // app.use('/api/v1/uc',            ucModule.mount());
-  // app.use('/api/v1/support',       supportModule.mount());
+  // TODO: mount the vendor, driver, uc and support modules once implemented.
 
-  // 9. 404
   app.use(notFound);
 
-  // 10. Error handler MUST be last.
+  // Must be registered last.
   app.use(errorHandler);
 
   return app;

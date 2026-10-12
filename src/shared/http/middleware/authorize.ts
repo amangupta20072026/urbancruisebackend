@@ -1,13 +1,7 @@
 /**
- * ==============================================================================
- * authorize(action, subject) — coarse RBAC middleware
- * ==============================================================================
- * Runs AFTER authenticate. If the identity's role isn't allowed to perform
- * `action` on `subject` per src/shared/rbac/policies.ts → 403 immediately.
- *
- * Instance-level checks (this specific booking, this specific user's referral
- * link) still happen in the service layer via module policy.canOperate().
- * ==============================================================================
+ * Role-level permission check (403 if denied). Use after authenticate.
+ * Checks on a specific record (e.g. "is this booking yours?") belong in the
+ * service layer.
  */
 import type { RequestHandler } from 'express';
 import { ForbiddenError } from '../../errors/index.js';

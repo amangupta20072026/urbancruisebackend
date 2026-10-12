@@ -1,19 +1,7 @@
 /**
- * ==============================================================================
- * withTransaction — the ONLY way to run a multi-statement transaction
- * ==============================================================================
- * Guarantees:
- *   - one connection per transaction (never shared across concurrent work)
- *   - commit on success, rollback on any thrown error
- *   - release the connection back to the pool in all cases
- *
- * Usage:
- *     await withTransaction(async (conn) => {
- *       await conn.execute('UPDATE ...', [args]);
- *       await conn.execute('INSERT ...', [args]);
- *       return { ok: true };
- *     });
- * ==============================================================================
+ * Runs fn inside a transaction on its own connection: commits on success,
+ * rolls back if fn throws, and always releases the connection.
+ * Use the given conn for every query that must be part of the transaction.
  */
 import type { PoolConnection } from 'mysql2/promise';
 import { pool } from './pool.js';

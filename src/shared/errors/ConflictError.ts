@@ -1,6 +1,6 @@
 import { AppError } from './AppError.js';
 
-/** 409 — unique-constraint hit, state conflict (e.g. cancel-already-cancelled), etc. */
+/** 409: request conflicts with current state (e.g. duplicate). */
 export class ConflictError extends AppError {
   constructor(
     message = 'The request conflicts with the current state.',

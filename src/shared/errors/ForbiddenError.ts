@@ -1,6 +1,6 @@
 import { AppError } from './AppError.js';
 
-/** 403 — authenticated, but not allowed to do this action / see this resource. */
+/** 403: authenticated but not allowed. */
 export class ForbiddenError extends AppError {
   constructor(
     message = 'You do not have permission to perform this action.',

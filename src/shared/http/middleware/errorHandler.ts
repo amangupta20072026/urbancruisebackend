@@ -1,21 +1,7 @@
 /**
- * ==============================================================================
- * errorHandler — the FINAL middleware
- * ==============================================================================
- * Every path ends here. Rules:
- *   1. `AppError` → its own statusCode + code + message + optional details.
- *   2. Anything else → 500 SERVER_ERROR. Stack logged, never returned.
- *   3. Log level: error for 5xx / non-operational; warn for 4xx.
- *   4. Includes the request-id so support can find the log line.
- *   5. RateLimitError with `retryAfter` → emits standard Retry-After header.
- *   6. Body-parser rejections (bad JSON, body too large, bad encoding) are
- *      CLIENT errors → mapped to 400/413/415 AppErrors first (audit fix #15).
- *      Before, malformed JSON surfaced as a 500 SERVER_ERROR and an
- *      error-level "unhandled" log line — paging on-call for client typos.
- *   7. Headers already sent → log, then destroy the socket (finding L7).
- *      Never leave the response open; never hand off to Express's default
- *      handler (it would print a second, unredacted stack to stderr).
- * ==============================================================================
+ * Final middleware: turns any error into the standard error envelope.
+ * AppError uses its own status and code; anything else is a 500 whose
+ * details are hidden in production. 5xx and bugs log at error, 4xx at warn.
  */
 import type { ErrorRequestHandler } from 'express';
 import { ENV } from '../../../config/env.js';
@@ -24,10 +10,8 @@ import { logger } from '../../logger/index.js';
 import type { ErrorEnvelope } from '../../types/api.js';
 
 /**
- * Express's body parsers throw plain Errors tagged with `type`, `status` and
- * `expose`. Translate the ones we know into AppErrors so they get the right
- * status, a stable code, and warn-level (not error-level) logging.
- * Anything else is returned unchanged.
+ * Maps body-parser errors (bad JSON, too large, bad encoding) to 4xx
+ * AppErrors so client mistakes are not reported as 500s.
  */
 function normaliseBodyParserError(err: unknown): unknown {
   if (err === null || typeof err !== 'object') return err;
@@ -81,8 +65,7 @@ export const errorHandler: ErrorRequestHandler = (rawErr, req, res, _next) => {
 
   const isOperational = isAppError ? err.isOperational : false;
   const requestId = String(req.id);
-  // When headers are already sent, `statusCode` above was never delivered —
-  // record what the client actually received so the log line is not misleading.
+  // If headers were already sent, log the status the client actually got.
   const logPayload = res.headersSent
     ? { err, requestId, statusCode, code, headersSent: true, sentStatusCode: res.statusCode }
     : { err, requestId, statusCode, code };
@@ -102,24 +85,13 @@ export const errorHandler: ErrorRequestHandler = (rawErr, req, res, _next) => {
     },
   };
 
-  // L7: response already (partially) written — the status line and headers
-  // are on the wire, so no error envelope can be sent and the response can
-  // never be completed correctly. Destroy the connection so the client sees
-  // a broken response at once (instead of waiting for bytes that will never
-  // come) and the keep-alive socket is never reused with a corrupt frame.
-  //
-  // Done here instead of next(err): Express's final handler performs this
-  // same req.socket.destroy(), but it ALSO console.error()s the raw stack
-  // (express/lib/application.js → logerror) — a second, unstructured,
-  // unredacted copy of an error already logged above.
+  // Response already started: it cannot be completed, so close the socket.
+  // Not passed to next(err) because Express would print an unredacted stack.
   if (res.headersSent) {
     req.socket.destroy();
     return;
   }
 
-  // Standard header for 429 responses that carry a hint. Only set when the
-  // value is known — spec allows either seconds or an HTTP-date; we always
-  // emit integer seconds.
   if (err instanceof RateLimitError && err.retryAfter !== undefined) {
     res.setHeader('Retry-After', String(err.retryAfter));
   }

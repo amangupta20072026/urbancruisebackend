@@ -1,16 +1,7 @@
 /**
- * ==============================================================================
- * MSG91 HTTP client — shared axios instance
- * ==============================================================================
- * ONE axios instance for every MSG91 call — SMS send (Flow API), template
- * lookup, wallet balance, webhook. Centralising means:
- *   • one place to swap the base URL when they move to control.msg91.eu
- *   • one place to add mTLS / signing headers
- *   • one interceptor block to normalise timeouts + errors
- *
- * `authkey` is a plain header on every request. MSG91 does NOT use Bearer.
- * Never log the header — pino redaction handles it via the shared redact list.
- * ==============================================================================
+ * Shared axios instance for MSG91. Auth is the plain `authkey` header (not
+ * Bearer). 'authkey' is not in the log redact list, so never log these
+ * request headers.
  */
 import axios, { type AxiosInstance } from 'axios';
 import { ENV } from '../../../config/env.js';
@@ -19,7 +10,7 @@ const MSG91_BASE = 'https://control.msg91.com/api';
 
 export const msg91Client: AxiosInstance = axios.create({
   baseURL: MSG91_BASE,
-  timeout: 8_000, // 8s — matches the "network timeout to MSG91" row in the failure matrix
+  timeout: 8_000,
   headers: {
     'Content-Type': 'application/json',
     Accept: 'application/json',

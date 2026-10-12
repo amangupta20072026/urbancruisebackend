@@ -1,14 +1,6 @@
 /**
- * ==============================================================================
- * Log redaction paths
- * ==============================================================================
- * Centralized list of JSON paths that Pino replaces with '[REDACTED]' before
- * writing. If you catch yourself thinking "I'll just log the auth header once
- * to debug" — DON'T. Add it here and confirm the debug path works with '[REDACTED]'.
- *
- * Pino's `redact` uses a subset of JSONPath. See:
- * https://getpino.io/#/docs/redaction
- * ==============================================================================
+ * Log fields pino replaces with '[REDACTED]'. Add any new secret field here
+ * instead of logging it. Syntax: https://getpino.io/#/docs/redaction
  */
 
 export const REDACT_PATHS: readonly string[] = [
@@ -21,7 +13,7 @@ export const REDACT_PATHS: readonly string[] = [
   // Response headers
   'res.headers["set-cookie"]',
 
-  // Common body fields — Pino walks nested objects.
+  // One level deep, under any key.
   '*.password',
   '*.passwordHash',
   '*.otp',
@@ -33,7 +25,7 @@ export const REDACT_PATHS: readonly string[] = [
   '*.apiKey',
   '*.privateKey',
 
-  // Direct-level (not under a nested key)
+  // Top level.
   'password',
   'otp',
   'token',

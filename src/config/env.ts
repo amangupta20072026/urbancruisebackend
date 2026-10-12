@@ -1,29 +1,7 @@
 /**
- * ==============================================================================
- * Environment configuration — Zod-parsed, fail-fast
- * ==============================================================================
- * Reads process.env ONCE at boot, validates it against a Zod schema, and exports
- * a strongly-typed `ENV` object for the rest of the app.
- *
- * On failure, the process exits IMMEDIATELY with a readable error listing every
- * missing / invalid variable. The alternative — booting with bad config and
- * crashing on first request — is a nightmare to debug in prod.
- *
- * `dotenv` reads `.env` in dev; in prod, PM2 / systemd inject env directly and
- * .env is not present.
- *
- * NOTE: `durationRegex` is imported from shared/utils/duration.ts — that
- * module also defines `ttlToSeconds` used by the auth service. One regex,
- * one parser: keeps the two in lockstep.
- *
- * FIREBASE (fix B2): FIREBASE_SERVICE_ACCOUNT_PATH is validated here like
- * every other variable, AND the file it points to is checked at boot
- * (exists, is a file, readable by this process, valid JSON with the
- * service-account fields). Before, the variable was read directly from
- * process.env inside shared/providers/firebase/admin.ts, so a missing or
- * wrong value crashed the process with a raw stack trace while app.ts was
- * being imported — and PM2 restarted it in a loop.
- * ==============================================================================
+ * Reads and validates process.env once at startup, then exports a typed ENV.
+ * Any missing or invalid value stops the process with a list of every problem.
+ * In development, values come from .env; in production, PM2 injects them.
  */
 import 'dotenv/config';
 import { accessSync, constants as fsConstants, readFileSync, statSync } from 'node:fs';
@@ -36,12 +14,7 @@ const secretSchema = z
   .refine(s => Buffer.byteLength(s, 'utf8') >= 32, 'must be at least 32 bytes');
 
 const schema = z.object({
-  // ── App ─────────────────────────────────────────────────────────────────
-  // REQUIRED — no default (fix N4). It used to default to 'development', so a
-  // production box started without `--env production` silently ran in dev
-  // mode: internal error messages (DB host, users, tables) were returned to
-  // anonymous clients and every production safety check below switched off.
-  // A missing value now stops the boot with a clear message instead.
+  // App. NODE_ENV has no default so a server can never start in dev mode by accident.
   NODE_ENV: z.enum(['development', 'production'], {
     error: () =>
       "must be set to 'production' or 'development' (no default — e.g. NODE_ENV=production in .env or the PM2 config)",
@@ -49,10 +22,10 @@ const schema = z.object({
   PORT: z.coerce.number().int().positive().max(65535).default(3001),
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
 
-  // ── Reverse proxy ───────────────────────────────────────────────────────
+  // Number of reverse proxies (e.g. Nginx) in front of the app; used for client IPs.
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(1),
 
-  // ── Rate limit ──────────────────────────────────────────────────────────
+  // Rate limits
   RATE_LIMIT_WINDOW_MS: z.coerce
     .number()
     .int()
@@ -61,7 +34,7 @@ const schema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
   RATE_LIMIT_AUTH_MAX: z.coerce.number().int().positive().default(20),
 
-  // ── Database ────────────────────────────────────────────────────────────
+  // MySQL
   DB_HOST: z.string().min(1),
   DB_PORT: z.coerce.number().int().positive().max(65535).default(3306),
   DB_USER: z.string().min(1),
@@ -70,12 +43,12 @@ const schema = z.object({
   DB_POOL_LIMIT: z.coerce.number().int().positive().max(200).default(20),
   DB_CONNECT_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
 
-  // ── Redis ───────────────────────────────────────────────────────────────
+  // Redis
   REDIS_HOST: z.string().min(1),
   REDIS_PORT: z.coerce.number().int().positive().max(65535).default(6379),
   REDIS_PASSWORD: z.string().min(1),
 
-  // ── MSG91 (SMS-only OTP transport) ──────────────────────────────────────
+  // MSG91 (SMS OTP). Test mobiles skip SMS and accept MSG91_TEST_OTP.
   MSG91_AUTH_KEY: z.string().min(1),
   MSG91_SMS_SENDER_ID: z.string().min(3).max(11),
   MSG91_SMS_TEMPLATE_ID: z.string().min(1),
@@ -83,11 +56,8 @@ const schema = z.object({
   MSG91_TEST_MOBILES: z.string().default(''),
   MSG91_TEST_OTP: z.string().regex(/^\d{6}$/),
 
-  // ── Firebase (push notifications) ───────────────────────────────────────
-  // Path to the service-account JSON downloaded from the Firebase console.
-  // Relative paths resolve against the process working directory (the
-  // project root under PM2). An ABSOLUTE path is recommended on servers.
-  // The file itself is checked after parsing — see checkFirebaseServiceAccount().
+  // Firebase service-account JSON path (absolute path recommended on servers).
+  // The file itself is checked below by checkFirebaseServiceAccount().
   FIREBASE_SERVICE_ACCOUNT_PATH: z
     .string({
       error: () =>
@@ -97,84 +67,40 @@ const schema = z.object({
     .trim()
     .min(1, 'must point to the Firebase service-account JSON file'),
 
-  // ── HTTP server timeouts — finding L2 ──────────────────────────────────
-  // Applied to the Node HTTP server in src/server.ts. Node's own defaults
-  // let a client take 5 minutes to send one request (requestTimeout
-  // 300 000 ms) and close idle keep-alive connections after 5 s.
-  //
-  //   HTTP_REQUEST_TIMEOUT_MS  — max time to RECEIVE a whole request
-  //                              (headers + body) from Nginx. Does NOT limit
-  //                              how long a handler may take to respond.
-  //   HTTP_HEADERS_TIMEOUT_MS  — max time to receive the request headers.
-  //                              Must be <= HTTP_REQUEST_TIMEOUT_MS.
-  //   HTTP_KEEP_ALIVE_TIMEOUT_MS — how long an idle keep-alive connection
-  //                              from Nginx stays open. MUST be LONGER than
-  //                              Nginx's upstream `keepalive_timeout` (Nginx
-  //                              default 60s), so Node never closes a
-  //                              connection Nginx is about to reuse (that
-  //                              race shows up as 502s). Default 65 s.
-  //
-  // If your Nginx config changes `keepalive_timeout` in the upstream block,
-  // set HTTP_KEEP_ALIVE_TIMEOUT_MS above it.
+  // HTTP server timeouts, applied in server.ts. Request/headers timeouts limit
+  // how long a client may take to send a request, not how long a handler runs.
+  // Keep-alive must be longer than Nginx's upstream keepalive_timeout, or
+  // Node may close a connection Nginx is reusing (502s).
   HTTP_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300_000).default(30_000),
   HTTP_HEADERS_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300_000).default(20_000),
   HTTP_KEEP_ALIVE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600_000).default(65_000),
 
-  // ── OTP anti-pumping: per-network (IP block) caps — finding M4 ──────────
-  // Hourly OTP-send caps per IPv4 /24 and per IPv6 /64. See
-  // modules/auth/service/ip-block-guard.ts for the full decision.
-  //   ≤ SOFT cap            → always allowed
-  //   SOFT < sends ≤ HARD   → allowed only while the block's OTP conversion
-  //                           (verified ÷ delivered) ≥ OTP_IP_BLOCK_MIN_CONVERSION
-  //   > HARD cap            → always refused (worst-case spend ceiling)
-  // The defaults below are STARTING VALUES, not measured ones. IPv4 starts
-  // higher because carrier CGNAT puts many users behind one /24. Tune both
-  // families from production data (otp_events + the `otp_ip_block_soft` /
-  // `otp_ip_block_limit` alarms) — a restart with new values is enough,
-  // no code change.
+  // Hourly OTP-send caps per IPv4 /24 and IPv6 /64 (see ip-block-guard.ts).
+  // Up to the soft cap: allowed. Between soft and hard: allowed only while the
+  // block's verify rate is at least OTP_IP_BLOCK_MIN_CONVERSION. Above hard:
+  // refused. IPv4 is higher because carrier CGNAT shares one /24 across many
+  // users. Defaults are starting values; tune them from production data.
   OTP_IPV4_BLOCK_SOFT_CAP_PER_HOUR: z.coerce.number().int().positive().default(100),
   OTP_IPV4_BLOCK_HARD_CAP_PER_HOUR: z.coerce.number().int().positive().default(1000),
   OTP_IPV6_BLOCK_SOFT_CAP_PER_HOUR: z.coerce.number().int().positive().default(20),
   OTP_IPV6_BLOCK_HARD_CAP_PER_HOUR: z.coerce.number().int().positive().default(200),
   OTP_IP_BLOCK_MIN_CONVERSION: z.coerce.number().min(0).max(1).default(0.25),
 
-  // ── JWT ─────────────────────────────────────────────────────────────────
+  // JWT
   JWT_ACCESS_SECRET: secretSchema,
   JWT_REFRESH_SECRET: secretSchema,
   JWT_ACCESS_TTL: z.string().regex(durationRegex, 'format: 15m | 1h | 30s | 7d').default('1h'),
   JWT_REFRESH_TTL: z.string().regex(durationRegex, 'format: 15m | 1h | 30s | 7d').default('30d'),
 
-  // ── CAPTCHA (hCaptcha) ──────────────────────────────────────────────────
-  // After a number trips the OTP brute-force lock, mobile_registry marks it
-  // captcha_required_until (+1h). When HCAPTCHA_SECRET is set, /otp/request
-  // for such a number must carry a valid hCaptcha token (body.captchaToken).
-  //
-  // Leave UNSET until the mobile app renders the hCaptcha widget — enforcing
-  // before the app can send tokens would lock real users out for that hour.
-  // While unset the gate is OFF (a production boot prints a warning).
+  // hCaptcha. When set, a number locked for too many wrong OTPs needs a valid
+  // captcha token for the next hour. Leave unset until the mobile app shows
+  // the hCaptcha widget, or locked numbers cannot log in for that hour.
   HCAPTCHA_SECRET: z.string().min(1).optional(),
-  /** Optional: when set, tokens issued for any other site key are rejected. */
+  // Optional: reject tokens issued for any other site key.
   HCAPTCHA_SITEKEY: z.string().min(1).optional(),
 
-  // ── Role gate ──────────────────────────────────────────────────────────────────────────
-  // Comma-separated list of user roles allowed to use the app on this
-  // environment. Enforced at EVERY door — OTP request, OTP verify, customer
-  // onboarding, token refresh and the authenticate middleware (fix H2; see
-  // shared/rbac/enabled-roles.ts). A disabled role gets 403 ROLE_NOT_ENABLED
-  // and no SMS, no session.
-  //
-  // Default: 'customer' only (MVP). When a new role's features ship, add it
-  // here in the deployment config — no code change needed.
-  //
-  // Each value MUST be one of: customer, vendor, driver, uc (fix H2). A typo
-  // used to be accepted silently — `ENABLED_ROLES=cutomer` switched EVERY
-  // role off. An unknown value or an empty list now stops the boot with a
-  // clear message.
-  //
-  // Example .env entries:
-  //   ENABLED_ROLES=customer
-  //   ENABLED_ROLES=customer,vendor
-  //   ENABLED_ROLES=customer,vendor,driver,uc
+  // Roles allowed on this environment, comma-separated (e.g. "customer,vendor").
+  // Allowed values: customer, vendor, driver, uc. See shared/rbac/enabled-roles.ts.
   ENABLED_ROLES: z
     .string()
     .default('customer')
@@ -206,21 +132,13 @@ if (!parsed.success) {
   process.exit(1);
 }
 
-/**
- * Cross-secret sanity check — silent misconfig if both secrets are the same.
- * The whole point of two secrets is that access-token compromise cannot
- * be used to mint refresh tokens.
- */
+// Separate secrets so a leaked access secret cannot mint refresh tokens.
 if (parsed.data.JWT_ACCESS_SECRET === parsed.data.JWT_REFRESH_SECRET) {
   console.error('\n❌ JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be DIFFERENT values.\n');
   process.exit(1);
 }
 
-/**
- * HTTP timeouts (L2): Node stops waiting for headers at whichever limit is
- * shorter, so headers > request would silently be ignored. Refuse to boot
- * on a combination that cannot mean what it says.
- */
+// A headers timeout above the request timeout would never take effect.
 if (parsed.data.HTTP_HEADERS_TIMEOUT_MS > parsed.data.HTTP_REQUEST_TIMEOUT_MS) {
   console.error(
     `\n❌ HTTP_HEADERS_TIMEOUT_MS (${parsed.data.HTTP_HEADERS_TIMEOUT_MS}) must be <= ` +
@@ -229,11 +147,7 @@ if (parsed.data.HTTP_HEADERS_TIMEOUT_MS > parsed.data.HTTP_REQUEST_TIMEOUT_MS) {
   process.exit(1);
 }
 
-/**
- * OTP IP-block caps (M4): a hard cap below its soft cap would make the
- * conversion check unreachable and silently turn the hard cap into the
- * real limit — exactly the false-positive M4 is about. Refuse to boot.
- */
+// A hard cap below the soft cap would make the conversion check unreachable.
 for (const fam of ['IPV4', 'IPV6'] as const) {
   const soft = parsed.data[`OTP_${fam}_BLOCK_SOFT_CAP_PER_HOUR`];
   const hard = parsed.data[`OTP_${fam}_BLOCK_HARD_CAP_PER_HOUR`];
@@ -246,18 +160,14 @@ for (const fam of ['IPV4', 'IPV6'] as const) {
   }
 }
 
-/**
- * Test-mobile safety net. Numbers in MSG91_TEST_MOBILES skip SMS and accept
- * MSG91_TEST_OTP, so anyone who knows that code can log in as those numbers.
- * In production that is only acceptable for a dedicated store-review account
- * with a non-guessable code — never with a trivial code like 123456.
- */
+// Anyone who knows MSG91_TEST_OTP can log in as a test mobile, so production
+// refuses guessable codes (repeated or sequential digits).
 if (parsed.data.NODE_ENV === 'production' && parsed.data.MSG91_TEST_MOBILES.trim() !== '') {
   const code = parsed.data.MSG91_TEST_OTP;
   const weak =
-    /^(\d)\1{5}$/.test(code) || // 000000, 111111, ...
-    '0123456789'.includes(code) || // 123456, 234567, ...
-    '9876543210'.includes(code); // 654321, 987654, ...
+    /^(\d)\1{5}$/.test(code) || // e.g. 111111
+    '0123456789'.includes(code) || // e.g. 123456
+    '9876543210'.includes(code); // e.g. 654321
   if (weak) {
     console.error(
       '\n❌ MSG91_TEST_MOBILES is set in production with a guessable MSG91_TEST_OTP.\n' +
@@ -272,10 +182,7 @@ if (parsed.data.NODE_ENV === 'production' && parsed.data.MSG91_TEST_MOBILES.trim
   );
 }
 
-/**
- * CAPTCHA gate visibility. The gate is a real control only when configured;
- * say so loudly in production so nobody assumes it is protecting them.
- */
+// Make it visible in production logs when the captcha gate is off.
 if (parsed.data.NODE_ENV === 'production' && !parsed.data.HCAPTCHA_SECRET) {
   console.warn(
     '\n⚠️  HCAPTCHA_SECRET is not set — the post-lockout CAPTCHA gate is DISABLED.\n' +
@@ -285,14 +192,9 @@ if (parsed.data.NODE_ENV === 'production' && !parsed.data.HCAPTCHA_SECRET) {
 }
 
 /**
- * Firebase service-account file check (fix B2).
- *
- * Runs at boot so a wrong path or an unreadable / broken file stops the
- * process HERE with a readable message — instead of crashing later inside
- * firebase-admin while app.ts is being imported.
- *
- * Only the presence of the required fields is checked; the values are never
- * printed (the file contains a private key).
+ * Fails startup with a clear message if the Firebase key file is missing,
+ * unreadable, or not a service-account key. Never prints the file's values
+ * (it contains a private key).
  */
 function checkFirebaseServiceAccount(rawPath: string): void {
   const fullPath = resolve(rawPath);

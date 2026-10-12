@@ -1,45 +1,13 @@
 /**
- * ==============================================================================
- * createServer — HTTP server + graceful shutdown
- * ==============================================================================
- * Contract with PM2 (see ecosystem.config.cjs):
- *   - After listen() succeeds we send 'ready' so PM2 knows the worker can
- *     accept traffic (`wait_ready: true`).
- *   - On SIGINT/SIGTERM we stop accepting new connections, wait for in-flight
- *     requests to finish (up to SHUTDOWN_TIMEOUT_MS), close the MySQL pool
- *     and the Redis client in parallel, then exit 0. If the grace window
- *     elapses, we force-exit 1 so PM2 can restart the worker.
+ * Starts the HTTP server and handles graceful shutdown.
  *
- * ORDER MATTERS: Redis and MySQL are closed only AFTER the HTTP drain.
- * In-flight requests still use Redis (JWT denylist, rate limiters, OTP
- * state) and MySQL; closing either earlier would fail requests that were
- * accepted before the signal arrived. They close in parallel and neither
- * close function throws, so one failing dependency cannot skip the other.
- * closeRedis() is bounded by REDIS_QUIT_TIMEOUT_MS; the force-exit timer
- * above caps everything else (including a hung pool.end()).
+ * Shutdown: stop accepting connections, let in-flight requests finish, then
+ * close MySQL and Redis (in-flight requests still need them). If this takes
+ * longer than SHUTDOWN_TIMEOUT_MS, the process force-exits with code 1.
  *
- * HTTP TIMEOUTS (finding L2): Node's defaults let one request take 5 min
- * to arrive and drop idle keep-alive connections after 5 s. We set:
- *   requestTimeout   — HTTP_REQUEST_TIMEOUT_MS   (receive whole request)
- *   headersTimeout   — HTTP_HEADERS_TIMEOUT_MS   (receive headers)
- *   keepAliveTimeout — HTTP_KEEP_ALIVE_TIMEOUT_MS (> Nginx upstream
- *                      keepalive_timeout, so Node never closes a socket
- *                      Nginx is about to reuse)
- * and pass connectionsCheckingInterval so those limits fire on time
- * (Node's default 30 s check interval delays them). requestTimeout does
- * NOT limit handler run time — a slow PDF render still completes.
- * Idle keep-alive sockets do not delay shutdown: server.close() drops them.
- *
- * DEADLINE vs PM2 (finding M8): PM2 sends SIGKILL `kill_timeout` ms after
- * its stop signal. That must be LATER than SHUTDOWN_TIMEOUT_MS, otherwise
- * PM2 kills the worker at the same moment our force-exit fires and the
- * final log lines are lost. PM2 exposes the value as
- * process.env.kill_timeout, so checkPm2KillTimeout() warns at boot
- * (`alarm: 'shutdown_deadline_misconfigured'`) when the gap is too small.
- *
- * Also traps unhandledRejection and uncaughtException — both are treated as
- * fatal (log + exit 1), and PM2 restarts.
- * ==============================================================================
+ * Timeouts: requestTimeout/headersTimeout limit how long a client may take to
+ * SEND a request (not how long a handler runs). keepAliveTimeout must stay
+ * above Nginx's upstream keepalive_timeout to avoid 502s.
  */
 import http from 'node:http';
 import type { Express } from 'express';
@@ -54,9 +22,8 @@ import { closePool } from './shared/db/pool.js';
 import { closeRedis } from './shared/redis/client.js';
 
 /**
- * Boot-time guard for M8. Only runs under PM2 (which sets
- * process.env.kill_timeout); plain `node`, `tsx` and tests skip it.
- * Logs and continues — a wrong deadline is worth an alarm, not an outage.
+ * Warns if PM2's kill_timeout is too short for our shutdown deadline, since
+ * PM2 would SIGKILL the worker mid-shutdown. Runs only under PM2.
  */
 function checkPm2KillTimeout(): void {
   const raw = process.env['kill_timeout'];
@@ -79,6 +46,7 @@ function checkPm2KillTimeout(): void {
 
 export function createServer(app: Express): http.Server {
   checkPm2KillTimeout();
+  // Short check interval so the timeouts below fire on time.
   const server = http.createServer(
     { connectionsCheckingInterval: HTTP_CONNECTIONS_CHECK_INTERVAL_MS },
     app,
@@ -98,7 +66,7 @@ export function createServer(app: Express): http.Server {
       },
       'server listening',
     );
-    // Signal PM2 we're ready (only relevant when spawned by PM2)
+    // Tells PM2 (wait_ready) this worker can take traffic. No-op outside PM2.
     process.send?.('ready');
   });
 
@@ -108,14 +76,12 @@ export function createServer(app: Express): http.Server {
     shuttingDown = true;
     logger.info({ signal }, 'shutdown initiated');
 
-    // Hard cap — force-exit if drain hangs
     const forceExit = setTimeout(() => {
       logger.error({ timeoutMs: SHUTDOWN_TIMEOUT_MS }, 'shutdown timed out; forcing exit');
       process.exit(1);
     }, SHUTDOWN_TIMEOUT_MS);
     forceExit.unref();
 
-    // Stop accepting new connections; wait for in-flight to complete
     await new Promise<void>(resolve => {
       server.close(err => {
         if (err) logger.error({ err }, 'http server close error');
@@ -123,7 +89,7 @@ export function createServer(app: Express): http.Server {
       });
     });
 
-    // Only now that no request can still need them: close MySQL + Redis.
+    // Close only after the drain; neither function throws.
     await Promise.all([closePool(), closeRedis()]);
 
     logger.info('shutdown complete');
@@ -134,7 +100,7 @@ export function createServer(app: Express): http.Server {
   process.on('SIGTERM', () => void shutdown('SIGTERM', 0));
   process.on('SIGINT', () => void shutdown('SIGINT', 0));
 
-  // These are BUGS. Log with full stack + exit; supervisor restarts.
+  // Treated as fatal bugs: log, shut down, and let PM2 restart the worker.
   process.on('unhandledRejection', (reason: unknown) => {
     logger.fatal({ err: reason }, 'unhandled promise rejection');
     void shutdown('unhandledRejection', 1);

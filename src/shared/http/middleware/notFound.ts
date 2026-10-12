@@ -1,11 +1,4 @@
-/**
- * ==============================================================================
- * notFound — catch-all 404 for unmatched routes
- * ==============================================================================
- * Mounted LAST, before errorHandler. Everything that reaches here is a
- * legitimate 404 — no route handler matched.
- * ==============================================================================
- */
+// 404 for any request that no route matched. Mounted after all routes.
 import type { RequestHandler } from 'express';
 import { NotFoundError } from '../../errors/index.js';
 import { redactUrl } from '../../logger/redactUrl.js';

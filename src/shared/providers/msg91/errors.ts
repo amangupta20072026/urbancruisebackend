@@ -1,44 +1,21 @@
 /**
- * ==============================================================================
- * MSG91 error normalization (SMS-only)
- * ==============================================================================
- * MSG91 sometimes returns `type: 'error'` inside a 200 body and sometimes uses
- * regular non-2xx HTTP status codes. This file collapses BOTH into a small set
- * of channel-neutral internal outcomes the service layer can pattern-match on.
- *
- * When email OTP lands as a second channel, its provider adapter should map
- * into the SAME `ProviderOutcome` set so downstream logic (retry, audit, error
- * surfacing) stays uniform.
- *
- * If MSG91 changes their codes, ONLY this file needs to update.
- *
- * References (official):
- *   • Send SMS via Flow (v5): https://api.msg91.com/apidoc/textsms/send-sms-flow.php
- *   • MSG91 error code index: https://msg91.com/help
- * ==============================================================================
+ * Maps MSG91 responses to a small set of outcomes. MSG91 reports errors both
+ * as non-2xx statuses and as `type: 'error'` in a 200 body; both are handled
+ * here, so only this file changes if MSG91's codes change.
  */
 import type { AxiosError, AxiosResponse } from 'axios';
 
-/**
- * Channel-neutral send outcome. Kept small on purpose — downstream code
- * pattern-matches on these, not on raw HTTP codes or provider strings.
- *
- * TRANSIENT outcomes (safe to retry inside dispatchOtp):
- *   - timeout, network, provider_server_error
- *
- * NON-TRANSIENT outcomes (retrying makes it worse or wastes money):
- *   - wallet_low, template_bad, provider_forbidden, rate_limited, unknown
- */
+/** Send outcome. Only timeout, network and provider_server_error are retried. */
 export type ProviderOutcome =
   | 'success'
-  | 'wallet_low' // provider account has no credit — surface as 503, do not retry
-  | 'template_bad' // template id / variables rejected — surface, do not retry
-  | 'provider_forbidden' // 403 — auth key invalid / route disabled — surface
-  | 'rate_limited' // provider-side rate limit hit — surface, do not retry
-  | 'provider_server_error' // 5xx — transient provider outage — retry once
-  | 'timeout' // network timeout — retry once
-  | 'network' // no response at all — retry once
-  | 'unknown'; // any other 4xx we cannot classify — do not retry
+  | 'wallet_low' // 402: no MSG91 credit
+  | 'template_bad' // template id or variables rejected
+  | 'provider_forbidden' // 403: bad auth key or route disabled
+  | 'rate_limited' // 429 from MSG91
+  | 'provider_server_error' // 5xx
+  | 'timeout'
+  | 'network' // no response
+  | 'unknown'; // anything else
 
 export type ProviderResult = {
   outcome: ProviderOutcome;
@@ -48,7 +25,7 @@ export type ProviderResult = {
   errorMessage?: string;
 };
 
-/** Loose shape of MSG91 body — every field optional; we probe via safe reads. */
+/** MSG91 body; every field is optional. */
 type Msg91Body = {
   type?: unknown;
   message?: unknown;
@@ -59,11 +36,8 @@ type Msg91Body = {
 };
 
 /**
- * Parse a SUCCESSFUL axios response body (2xx). MSG91 may still return
- * `type: 'error'` inside a 200 body — check the body flag, not just status.
- *
- * On success, MSG91's Flow API echoes the provider request-id in `message`;
- * we surface it so the webhook can be correlated later.
+ * Parses a 2xx response (which can still contain `type: 'error'`). On
+ * success, `message` holds MSG91's request id, used to match webhooks.
  */
 export function parseMsg91Response(res: AxiosResponse): ProviderResult {
   const body = (res.data ?? {}) as Msg91Body;
@@ -80,17 +54,13 @@ export function parseMsg91Response(res: AxiosResponse): ProviderResult {
   const code = extractErrorCode(body);
   const errMsg = String(body.message ?? body.error ?? 'MSG91 error');
 
-  // 200 with type='error' — classify by message/code where we can, otherwise unknown.
   if (code && /template/i.test(errMsg)) {
     return build('template_bad', errMsg, code, body);
   }
   return build('unknown', errMsg, code, body);
 }
 
-/**
- * Parse an axios ERROR (non-2xx or transport-level). Maps HTTP status to
- * the internal outcome set.
- */
+/** Parses an axios error (non-2xx or no response). */
 export function parseMsg91Error(err: unknown): ProviderResult {
   const ax = err as AxiosError;
 
@@ -117,9 +87,6 @@ export function parseMsg91Error(err: unknown): ProviderResult {
       if (code && /template/i.test(errMsg)) return build('template_bad', errMsg, code, body);
       return build('unknown', errMsg, code, body);
     default:
-      // 5xx from MSG91 — transient provider outage. Distinguished from
-      // 'unknown' (which is 4xx we can't classify) because 5xx is safe to
-      // retry once whereas a mystery 4xx probably isn't.
       if (status >= 500 && status <= 599) {
         return build('provider_server_error', errMsg, code, body);
       }

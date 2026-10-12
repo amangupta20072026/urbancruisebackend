@@ -1,31 +1,13 @@
-/**
- * ==============================================================================
- * shared/utils/currency — Indian Rupee formatting helpers
- * ==============================================================================
- * Extracted from receipt-template.tsx (SRP fix — the PDF template should be
- * purely presentational; formatting logic is reusable across any module that
- * needs to display or describe INR amounts).
- *
- * EXPORTS
- *   formatRupees(n)      — ₹1,23,456  (Indian locale, ₹ prefix)
- *   rupeesToWords(n)     — "Rupees One Lakh Twenty Three Thousand ... Only"
- *   fmtDateTime(iso)     — "12 Jan 2025, 03:45 pm"  (en-IN locale)
- * ==============================================================================
- */
+// Rupee and date formatting for display (used by the payment receipt).
 
-/**
- * Format a number as an Indian-locale rupee string.
- * e.g. 123456 → "₹1,23,456"
- */
+/** 123456 → "₹1,23,456" */
 export function formatRupees(n: number): string {
   return `\u20B9${n.toLocaleString('en-IN')}`;
 }
 
 /**
- * Convert an INR amount to its English word representation.
- * e.g. 123456 → "Rupees One Lakh Twenty Three Thousand Four Hundred
- *                Fifty Six Only"
- * Returns '' for non-finite or negative values.
+ * 123456 → "Rupees One Lakh Twenty Three Thousand Four Hundred Fifty Six Only".
+ * Paise are dropped. Returns '' for negative or non-finite values.
  */
 export function rupeesToWords(amount: number): string {
   if (!Number.isFinite(amount) || amount < 0) return '';
@@ -96,8 +78,8 @@ export function rupeesToWords(amount: number): string {
 }
 
 /**
- * Format an ISO 8601 date-time string for display in Indian locale.
- * e.g. "2025-01-12T10:15:00Z" → "12 Jan 2025, 10:15 am"
+ * ISO date-time → e.g. "12 Jan 2025, 10:15 am" (en-IN format).
+ * Uses the server's timezone (no timeZone option is set).
  */
 export function fmtDateTime(iso: string): string {
   return new Date(iso).toLocaleString('en-IN', {

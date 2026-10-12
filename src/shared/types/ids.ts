@@ -1,18 +1,6 @@
 /**
- * ==============================================================================
- * Branded ID types
- * ==============================================================================
- * Marketing a `string` as a `BookingId` prevents accidents like passing a
- * `CustomerId` where a `BookingId` was expected — TypeScript rejects it at
- * compile time. Zero runtime cost.
- *
- * SCOPE (step-one): only customer-side IDs. Vehicle/Vendor/Driver/UcUser/
- * Staff/Issue IDs will be added when their features land.
- *
- * Cast at the boundary:
- *     const id = req.params.id as BookingId;
- * ...and then the type system does the rest.
- * ==============================================================================
+ * Branded id types: compile-time only, so one kind of id can't be passed
+ * where another is expected. Cast at the boundary: `id as BookingId`.
  */
 
 type Brand<K, T> = K & { readonly __brand: T };

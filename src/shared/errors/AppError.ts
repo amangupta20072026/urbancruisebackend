@@ -1,20 +1,9 @@
 /**
- * ==============================================================================
- * AppError — base of the error hierarchy
- * ==============================================================================
- * Every deliberately-thrown error in the codebase is a subclass of AppError.
- * The final `errorHandler` middleware translates AppError instances into HTTP responses.
- * Anything that is NOT an AppError is treated as a 500 bug and
- * logged with `err.stack`.
+ * Base class for all intentionally thrown errors. errorHandler turns these
+ * into HTTP responses; any other error becomes a 500.
  *
- * Rules:
- *   - `statusCode` — the HTTP status to send.
- *   - `code`       — stable UPPER_SNAKE identifier. Never change; clients key
- *                    localized messages off this.
- *   - `isOperational` — true for expected-in-prod errors (bad input, no auth).
- *                       false for bugs. Used to decide whether to alert on-call.
- *   - `details` — optional structured extra data (Zod issues, conflicting field…).
- * ==============================================================================
+ * code: stable identifier the app relies on — never rename an existing one.
+ * isOperational: false marks a bug and is logged at error level.
  */
 
 export type AppErrorOptions = {

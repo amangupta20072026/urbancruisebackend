@@ -1,21 +1,6 @@
 /**
- * ==============================================================================
- * dependency-cruiser — architecture boundary enforcement
- * ==============================================================================
- * Enforces the modular-monolith invariants:
- *
- *   1. `shared/` NEVER imports from `modules/`.
- *   2. A module NEVER imports another module's internals — only its `index.ts`.
- *   3. Sub-modules of the same parent NEVER import each other — only the
- *      parent's index composes them.
- *   4. No circular dependencies anywhere.
- *   5. Nothing imports test/dev-only code from production code.
- *
- * Run:
- *     npm run depcruise
- *
- * Also runs in `.husky/pre-commit`, so bad imports fail before landing on main.
- * ==============================================================================
+ * dependency-cruiser: enforces module boundaries. Run with `npm run depcruise`
+ * (also runs in the pre-commit hook).
  */
 module.exports = {
   forbidden: [
@@ -44,7 +29,7 @@ module.exports = {
       from: { path: '^src/modules/([^/]+)/' },
       to: {
         path: '^src/modules/([^/]+)/(?!index\\.ts$).+',
-        pathNot: '^src/modules/$1/', // same module — internal imports OK
+        pathNot: '^src/modules/$1/', // imports within the same module are allowed
       },
     },
     {

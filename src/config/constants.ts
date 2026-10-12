@@ -1,249 +1,120 @@
 /**
- * ==============================================================================
- * Non-secret application constants
- * ==============================================================================
- * Anything a security auditor should NOT see in .env goes here. If a value
- * changes per environment it belongs in env.ts. If it never changes, it
- * belongs here.
- * ==============================================================================
+ * Fixed, non-secret application constants. Values that differ per
+ * environment or are secret belong in env.ts instead.
  */
 
-/**
- * Request body limits (audit fix #15). Were 10mb: every unauthenticated
- * endpoint would read and JSON-parse up to 10 MB per request — a cheap
- * CPU/memory amplifier for anyone. The largest legitimate body in this API
- * (an FCM token registration, ~4 KB) is far below 100 KB. There are no file
- * uploads; if one is added it must use its own route-level parser/limit.
- */
+// Body size limits for all routes except webhooks. A route that ever needs
+// file uploads must use its own parser and limit.
 export const JSON_BODY_LIMIT = '100kb';
 export const URLENCODED_BODY_LIMIT = '100kb';
 
-/** Provider webhooks only (MSG91 DLR batches can carry hundreds of records). */
+// Webhooks only: MSG91 delivery reports arrive in large batches.
 export const WEBHOOK_BODY_LIMIT = '1mb';
 
-/** Default pagination page size when the caller doesn't specify one. */
 export const DEFAULT_PAGE_SIZE = 20;
-/** Max page size we'll honor even if the caller asks for more. */
 export const MAX_PAGE_SIZE = 100;
 
-/**
- * How often Node checks open connections against requestTimeout /
- * headersTimeout (finding L2). Node's default is 30 000 ms, which means a
- * 30 s requestTimeout could take up to ~60 s to fire — measured: with the
- * default interval, a 3 s limit closed a slow client only after 30 s; with
- * 1 000 ms it closed at 3 s. The HTTP timeouts themselves are env-tunable
- * (HTTP_*_TIMEOUT_MS in config/env.ts).
- *
- * (Replaces the old REQUEST_TIMEOUT_MS constant, which was never used.)
- */
+// How often Node enforces the HTTP request/headers timeouts. Node's default
+// (30 s) makes those timeouts fire up to 30 s late.
 export const HTTP_CONNECTIONS_CHECK_INTERVAL_MS = 1_000;
 
-/**
- * IPv6 prefix length used to group clients in the HTTP rate limiters
- * (finding M5 follow-up). Single source of truth — used via clientIpKey()
- * in shared/http/middleware/rateLimit.ts.
- *
- * WHY /64 (not express-rate-limit's default /56):
- *   The API is consumed by native mobile apps. 3GPP TS 23.401 §5.3.1.2.2:
- *   the PDN gateway gives each UE "a globally unique /64 IPv6 prefix". So
- *   /64 ≈ one device. /56 would put up to 256 such /64s in one bucket —
- *   if those belong to different subscribers they would share one limit.
- *   Trade-off: a client holding a larger block can spread across /64s.
- *   These HTTP limiters are a coarse outer guard; the OTP endpoints' real
- *   limits (per-mobile, per-network with conversion, per-prefix) live in
- *   modules/auth/service/rate-limits.ts and do not depend on this value.
- *
- * Passed EXPLICITLY so a library default change can never silently change
- * how users are grouped. Kept equal to the /64 used by bucketIp()
- * (shared/utils/ip-bucket.ts) so both limiters group a device the same way.
- */
+// IPv6 prefix used to group clients in the HTTP rate limiters. Mobile
+// networks give each device its own /64, so /64 ≈ one device. Set explicitly
+// so a library default change cannot alter grouping. Keep equal to the /64
+// in shared/utils/ip-bucket.ts.
 export const IPV6_RATE_LIMIT_SUBNET = 64;
 
-/** How long the graceful shutdown drain has before we hard-exit.
- *  PM2's `kill_timeout` (ecosystem.config.cjs) MUST be larger — at least
- *  this + SHUTDOWN_KILL_MARGIN_MS — or PM2's SIGKILL races our own exit
- *  (finding M8). server.ts checks this at boot. */
+// Graceful shutdown deadline before force-exit. PM2's kill_timeout in
+// ecosystem.config.cjs must be at least this + SHUTDOWN_KILL_MARGIN_MS.
 export const SHUTDOWN_TIMEOUT_MS = 15_000;
 
-/** Minimum gap between our shutdown deadline and PM2's SIGKILL, so the
- *  force-exit path still has time to write its final log line. */
+// Extra time PM2 must allow so the force-exit can still log before SIGKILL.
 export const SHUTDOWN_KILL_MARGIN_MS = 2_000;
 
-/**
- * Per-dependency budget for the /ready probe (MySQL ping, Redis ping).
- * Checks run in parallel, so the whole probe answers within roughly this
- * time even when a dependency hangs. Keep it well below the orchestrator /
- * load-balancer probe timeout so we always answer 503 ourselves rather than
- * letting the caller time out with no signal.
- */
+// Per-dependency timeout for the /ready probe. Keep below the load
+// balancer's probe timeout so we answer 503 instead of timing out.
 export const READINESS_CHECK_TIMEOUT_MS = 2_000;
 
-/** Header names — centralize spelling so no one typoes 'X-Request-ID' vs 'X-Request-Id'. */
 export const HEADER_REQUEST_ID = 'x-request-id';
 export const HEADER_AUTHORIZATION = 'authorization';
 export const HEADER_IDEMPOTENCY_KEY = 'idempotency-key';
 
-/* ==============================================================================
- * OTP / auth constants — tune here, not scattered across the auth module.
- * ============================================================================== */
+/* ---------- OTP / auth ---------- */
 
-/** OTP code length (digits). Change only if MSG91 template also changes. */
+// Must match the MSG91 SMS template.
 export const OTP_LENGTH = 6;
 
-/** How long a sent OTP is valid, in seconds. Redis TTL matches. */
-export const OTP_SESSION_TTL_SECONDS = 10 * 60; // 10 min
+export const OTP_SESSION_TTL_SECONDS = 10 * 60;
 
-/** Client-facing "you may resend after N seconds" throttle. Enforced by
- *  Redis cooldown too — client just uses this to render the countdown. */
+// Sent to the client for its resend countdown. The server-side cooldown is
+// OTP_SEND_MIN_INTERVAL_SECONDS.
 export const OTP_RESEND_COOLDOWN_SECONDS = 30;
 
-/** Idempotency snapshot lifetime — response for /auth/otp/request is
- *  replayable for 24h via the Idempotency-Key header. */
+// How long an /auth/otp/request response can be replayed via Idempotency-Key.
 export const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60;
 
-/** Verify-fail counter TTL (per mobile). Hitting VERIFY_FAIL_LOCK_THRESHOLD
- *  within this window locks the number for VERIFY_LOCK_DURATION_SECONDS. */
-export const VERIFY_FAIL_WINDOW_SECONDS = 15 * 60; // 15 min
+// This many wrong codes for one mobile within the window locks the number
+// for VERIFY_LOCK_DURATION_SECONDS.
+export const VERIFY_FAIL_WINDOW_SECONDS = 15 * 60;
 export const VERIFY_FAIL_LOCK_THRESHOLD = 5;
 
-/** Max verify attempts against ONE OTP (one requestId), enforced atomically
- *  BEFORE the code is compared. This is the hard brute-force bound: however
- *  many guesses arrive in parallel, at most this many are ever evaluated per
- *  OTP. Combined with OTP_SEND_MAX_PER_DAY it caps guesses per number per
- *  day at 5 × 10 = 50 (≈ 1 in 20,000 odds for a 6-digit code). */
+// Max verify attempts per OTP, counted before the code is compared, so
+// parallel guesses cannot exceed it.
 export const OTP_MAX_VERIFY_ATTEMPTS = 5;
-export const VERIFY_LOCK_DURATION_SECONDS = 15 * 60; // 15 min
+export const VERIFY_LOCK_DURATION_SECONDS = 15 * 60;
 
-/* ==============================================================================
- * Customer onboarding (new customer after OTP verify)
- * ============================================================================== */
+/* ---------- Customer onboarding ---------- */
 
-/** How long a new customer has to finish the onboarding form after verifying
- *  their OTP. After this they must request a fresh OTP. */
-export const ONBOARDING_TICKET_TTL_SECONDS = 30 * 60; // 30 min
+// Time a new customer has to finish onboarding after verifying the OTP.
+export const ONBOARDING_TICKET_TTL_SECONDS = 30 * 60;
 
-/** Max time to wait for the per-mobile MySQL named lock that serialises
- *  customer creation (prevents duplicate rows for the same number). */
+// Wait limit for the per-mobile MySQL lock that prevents duplicate customers.
 export const CUSTOMER_CREATE_LOCK_TIMEOUT_SECONDS = 5;
 
-/* ==============================================================================
- * Account status — which values in the shared DB mean "may log in"
- * ==============================================================================
- * The web app owns these columns. Comparison is case-insensitive and trimmed.
- * Anything NOT listed here is treated as inactive (allowlist, not denylist):
- * a new status value added by the web team can never accidentally grant
- * access.
- *
- *   uc_staff.status — enum('active','suspended','left')
- *   vendors.status  — free varchar; NULL/'' on legacy rows
- *   customers / drivers — no status column → always active
- *
- * Verify the vendor values in production with:
- *   SELECT status, COUNT(*) FROM vendors GROUP BY status;
- * ============================================================================== */
+/* ---------- Account status ---------- */
+
+// Status values (trimmed, case-insensitive) that allow login. Anything else
+// is treated as inactive. Applies to uc_staff and vendors; customers and
+// drivers have no status column.
 export const ACTIVE_STATUS_VALUES: ReadonlySet<string> = new Set(['active']);
 
-/** Legacy vendor rows were created before the status column existed.
- *  true  → NULL/'' vendor status is treated as active.
- *  false → only rows explicitly marked active may log in. */
+// Treat NULL/empty vendor status (legacy rows) as active.
 export const VENDOR_NULL_STATUS_IS_ACTIVE = true;
 
-/* ==============================================================================
- * OTP send rate limits (per mobile). Enforced in Redis before hitting MSG91.
- * ============================================================================== */
+/* ---------- OTP send limits (per mobile) ---------- */
 
-/** Max OTP sends per mobile per 10 minutes.
- *  PRODUCTION VALUE — do not raise for local testing; add the number to
- *  MSG91_TEST_MOBILES instead (test mobiles skip SMS entirely). */
+// Production values. For local testing, add the number to MSG91_TEST_MOBILES
+// instead of raising these.
 export const OTP_SEND_MAX_PER_10M = 3;
-/** Max OTP sends per mobile per day. PRODUCTION VALUE — see note above. */
 export const OTP_SEND_MAX_PER_DAY = 10;
-/** Hard cooldown between two consecutive sends to the same mobile. */
 export const OTP_SEND_MIN_INTERVAL_SECONDS = 30;
 
-/* ==============================================================================
- * SMS-pumping defenses — subnet + number-prefix hourly caps
- * ==============================================================================
- * These layer on top of the per-mobile limits above. Per-mobile caps do not
- * defend against pumping because the attack rotates target numbers — each
- * probe hits a fresh per-mobile bucket. The two limits below catch the
- * shared attributes of pumping traffic:
- *
- *   IP-block limit — attackers behind a small IP range (VPN endpoints,
- *   botnet subnets, rented server ranges) share the /24 (or /64 for IPv6).
- *   Legitimate shared traffic (carrier CGNAT, corporate NAT, campus) also
- *   shares subnets, so this limit is conversion-aware and env-tunable.
- *
- *   Number-prefix limit — SMS pumping farms register blocks of numbers on
- *   a single mobile operator, which cluster on a narrow prefix range
- *   (~10k numbers per 5-char prefix in India). Tune upward if your largest
- *   legitimate operator cluster's peak hour exceeds this.
- *
- * Both are HOURLY windows in Redis. Test-mobile paths bypass both — QA
- * tooling should never trip anti-abuse limits.
- * ============================================================================== */
+/* ---------- SMS-pumping defense (number prefix) ---------- */
+// Per-IP-block caps are in env.ts (OTP_IPV4_* / OTP_IPV6_*).
+// Test mobiles skip these limits.
 
-/* Per IP subnet (IPv4 /24, IPv6 /64) caps are NOT constants any more
- * (finding M4): a flat 100/hour blocked genuine users behind carrier CGNAT.
- * They are now env-tunable soft/hard caps with a conversion check — see
- * OTP_IPV4_* / OTP_IPV6_* / OTP_IP_BLOCK_MIN_CONVERSION in config/env.ts and
- * modules/auth/service/ip-block-guard.ts. */
-
-/** Max OTP sends per number prefix per hour. */
 export const OTP_SEND_MAX_PER_PREFIX_PER_HOUR = 500;
 
-/** How many leading characters of the mobile (including country code) form
- *  the prefix bucket. 5 covers country code + 3-digit operator prefix,
- *  e.g. '91981' groups all Airtel Delhi-ish numbers starting +91981xxxxxxx. */
+// Leading characters of the mobile (with country code) used as the prefix,
+// e.g. "91981".
 export const OTP_PREFIX_LENGTH = 5;
 
-/* ==============================================================================
- * MSG91 provider reliability — retry + circuit breaker
- * ============================================================================== */
+/* ---------- MSG91 retry and circuit breaker ---------- */
 
-/**
- * How many times to retry a TRANSIENT MSG91 failure inside one dispatch call.
- * "Transient" means `network`, `timeout`, or a provider 5xx — cases where the
- * request may not have reached MSG91 or their side had a temporary problem.
- * NEVER retries `wallet_low`, `template_bad`, `provider_forbidden`, or
- * `rate_limited` — retrying those either wastes money or makes rate-limit
- * throttling worse.
- *
- * The retry sends the SAME OTP value, so if MSG91 actually processed the first
- * request (but we didn't see the response), the user just gets two identical
- * SMSes and uses either one. No security impact — the code in both is the same.
- */
+// Retries only transient failures (network, timeout, 5xx). The retry sends
+// the same OTP, so a duplicate SMS is harmless.
 export const MSG91_MAX_RETRIES = 1;
-/** Backoff before the retry attempt, in milliseconds. */
 export const MSG91_RETRY_DELAY_MS = 500;
 
-/**
- * Circuit breaker — after N consecutive provider-side failures within
- * MSG91_CB_WINDOW_SECONDS, we stop calling MSG91 for MSG91_CB_OPEN_SECONDS.
- * During that window, /auth/otp/request returns 503 SERVICE_UNAVAILABLE
- * immediately rather than eating an 8-second timeout per request.
- *
- * These values are tuned so a real MSG91 outage trips the breaker within a
- * handful of requests, but transient glitches (one or two failures in a busy
- * window) don't. Test-mobile sends bypass the breaker entirely.
- */
+// After this many failed sends in a row (within the window; a success resets
+// the count), stop calling MSG91 for MSG91_CB_OPEN_SECONDS and return 503.
 export const MSG91_CB_FAILURE_THRESHOLD = 5;
-export const MSG91_CB_WINDOW_SECONDS = 300; // 5 min sliding window
+export const MSG91_CB_WINDOW_SECONDS = 300;
 export const MSG91_CB_OPEN_SECONDS = 60;
 
-/* ==============================================================================
- * Refresh-token reuse grace window (fix M2)
- * ==============================================================================
- * A refresh token that was rotated by a normal refresh at most this many
- * seconds ago — and whose replacement session is still active — is treated
- * as the app's own duplicate request (two API calls hit 401 together and
- * both refreshed with the same token), not as theft. The server issues a
- * fresh token pair instead of revoking every session on every device.
- *
- * Outside the window, or if the replacement was logged out / revoked, the
- * normal reuse detection applies: all sessions are revoked.
- *
- * Keep it SHORT: it is also the window in which a stolen-and-replayed token
- * goes unnoticed. 10 s covers network retries and parallel 401 handlers.
- * ============================================================================== */
+/* ---------- Refresh token reuse ---------- */
+
+// A refresh token reused within this many seconds of its own rotation (with
+// the new session still active) is treated as a duplicate request from the
+// app, not theft. Keep short: replay goes unnoticed inside this window.
 export const REFRESH_REUSE_GRACE_SECONDS = 10;

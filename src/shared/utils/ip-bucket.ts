@@ -1,39 +1,18 @@
 /**
- * ==============================================================================
- * IP → subnet-bucket helpers (SMS-pumping / abuse-limit buckets)
- * ==============================================================================
- * bucketIp(ip)
- *   IPv4 → /24 key ("v4:a.b.c")
- *   IPv6 → /64 key ("v6:xxxx:xxxx:xxxx:xxxx")
- *   null | unparseable → null (caller must skip the check — fail-open)
- *
- * WHY /24 AND /64:
- *   Legitimate corporate NAT / campus / coworking traffic shares a small
- *   IPv4 subnet, so /24 is coarse enough not to false-positive on the good
- *   guys while still catching attackers behind a small VPN pool. For IPv6,
- *   mobile networks give each device its own /64 (3GPP TS 23.401
- *   §5.3.1.2.2), so /64 ≈ one device. (RFC 6177 does NOT fix a standard
- *   end-site size — it leaves it to operators, typically /48 to /64.)
- *   Keep this equal to IPV6_RATE_LIMIT_SUBNET (config/constants.ts) so the
- *   OTP network cap and the HTTP rate limiters group a device the same way.
- *
- * Extracted from src/modules/auth/service.ts (formerly ~lines 970-1015).
- * Kept UNIT-testable: no Redis / no logger / no DB — pure functions of a
- * string in and a string out.
- * ==============================================================================
+ * Groups client IPs into network buckets for the OTP abuse limits:
+ * IPv4 → /24 ("v4:a.b.c"), IPv6 → /64 ("v6:xxxx:xxxx:xxxx:xxxx").
+ * IPv4 /24 catches small VPN or server ranges; an IPv6 /64 is usually one
+ * mobile device. Keep the /64 equal to IPV6_RATE_LIMIT_SUBNET.
  */
 import { isIPv4, isIPv6 } from 'node:net';
 
 /**
- * Reduce a client IP to a coarse anti-abuse bucket key.
- * Returns null when the IP is missing or unparseable so the caller can
- * skip the corresponding rate-limit check (fail-open on infra noise —
- * per-mobile limits still apply).
+ * Returns the bucket key, or null for a missing/invalid IP (the caller then
+ * skips the IP check; per-mobile limits still apply).
  */
 export function bucketIp(ip: string | null): string | null {
   if (!ip) return null;
-  // Node hands us IPv4-mapped IPv6 (::ffff:x.x.x.x) on dual-stack sockets —
-  // unwrap so the IPv4 branch handles it.
+  // Treat IPv4-mapped IPv6 (::ffff:a.b.c.d) as IPv4.
   const stripped = ip.replace(/^::ffff:/, '');
   if (isIPv4(stripped)) {
     const [a, b, c] = stripped.split('.');
@@ -46,13 +25,8 @@ export function bucketIp(ip: string | null): string | null {
 }
 
 /**
- * Take the first four hextets of an IPv6 address (the /64 network portion).
- * Handles `::` compression by expanding to eight groups first, then slicing.
- * Padded to four-hex per hextet so equivalent addresses hash to the same key
- * regardless of how the client wrote them (2001:db8:: and 2001:0db8:0:0::
- * are the same network).
- *
- * Exported so tests can hit it directly.
+ * First four groups (/64) of an IPv6 address, expanded and zero-padded so
+ * different spellings of the same network give the same key.
  */
 export function ipv6First64(ip: string): string {
   const parts = ip.split(':');

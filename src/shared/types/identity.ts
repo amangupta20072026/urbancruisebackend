@@ -1,31 +1,12 @@
-/**
- * ==============================================================================
- * Identity — the authenticated caller
- * ==============================================================================
- * Populated by `authenticate` middleware from a verified JWT. Attached to
- * req.identity AND stored in AsyncLocalStorage (so services / repositories
- * can read it without threading it through every function signature).
- * ==============================================================================
- */
+/** The authenticated caller, built from the access token by authenticate. */
 import type { UserRole } from '../rbac/roles.js';
 
 export type Identity = {
-  /** Stable user identifier — one row in the users table. */
+  /** Row id in the role's table (customers, vendors, drivers or uc_staff). */
   userId: string;
-  /** Top-level role. All four are typed; non-customer roles are rejected at the auth guard until their features ship. */
   role: UserRole;
-  /**
-   * The tenant column value for this user's role:
-   *   customer → customer_id
-   *   vendor   → vendor_id
-   *   driver   → driver_id
-   *   uc       → uc_user_id
-   */
+  /** Currently the same value as userId. */
   entityId: string;
-  /**
-   * The auth_sessions row (jti) this access token was minted from. Used
-   * by /auth/logout to revoke exactly this session and by the deny-list
-   * middleware to check if this token has been forcibly logged out.
-   */
+  /** auth_sessions jti. Used by logout and the revocation check. */
   sessionId: string;
 };

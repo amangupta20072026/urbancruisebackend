@@ -1,49 +1,13 @@
 /**
- * ==============================================================================
- * MSG91 delivery-report (DLR) webhook — payload parsing + URL-token check
- * ==============================================================================
- * MSG91 does NOT sign DLR pushes with an HMAC / signature header — this is
- * confirmed by their official docs (api.msg91.com/apidoc/textsms/delivery-
- * report.php and the "Push DLR" KB pages). Their portal simply POSTs to
- * whatever URL you configure. There is no `x-msg91-signature` header.
- *
- * The practical, provider-agnostic pattern for callbacks-without-signatures
- * is to embed a shared secret in the webhook URL path itself:
- *
- *     https://api.example.com/webhooks/msg91/<SECRET_TOKEN>/delivery
- *
- * You give this URL only to MSG91's dashboard. Because the URL is a secret,
- * possession of it authenticates the caller. Rotate by generating a new
- * MSG91_WEBHOOK_SECRET and updating the URL in the MSG91 portal.
- *
- * NOTE ON PAYLOAD SHAPES:
- * MSG91 has historically used two DLR shapes across their SMS products:
- *
- *   (A) Legacy "sendhttp" / classic DLR push — flat body, per record:
- *         { reqid, status, desc, number, date }
- *       where status is numeric: 1=delivered, 2=failed, 16=rejected
- *
- *   (B) Flow / v5 DLR push — JSON array of objects:
- *         [{ requestId, numbers: { "919812345678": { status, desc, ... } } }]
- *
- * We accept both, plus a bare array-of-flat-records case, so the same
- * endpoint works regardless of which product family the send used. Any
- * unrecognised shape is logged (never crashes) and the endpoint returns
- * 200 so MSG91 doesn't retry forever.
- *
- * MSG91 status code mapping (per their delivery-report API doc):
- *   1  → delivered
- *   2  → failed (transient — subscriber absent, out of coverage, etc.)
- *   16 → rejected (permanent — DND, invalid number, template block)
- * ==============================================================================
+ * MSG91 delivery-report (DLR) webhook helpers. MSG91 does not sign these
+ * requests, so the URL carries a secret instead:
+ *   /webhooks/msg91/<MSG91_WEBHOOK_SECRET>/delivery
+ * To rotate: change MSG91_WEBHOOK_SECRET and update the URL in MSG91.
  */
 import { timingSafeEqual } from 'node:crypto';
 import { ENV } from '../../../config/env.js';
 
-/**
- * Timing-safe compare of a candidate token against the configured secret.
- * Used by the route to verify the `:token` URL param.
- */
+/** Constant-time check of the URL token against MSG91_WEBHOOK_SECRET. */
 export function verifyWebhookToken(candidate: string | undefined): boolean {
   if (!candidate) return false;
   const expected = ENV.MSG91_WEBHOOK_SECRET;
@@ -53,38 +17,29 @@ export function verifyWebhookToken(candidate: string | undefined): boolean {
   return timingSafeEqual(a, b);
 }
 
-/* ==============================================================================
- * DLR payload parsing
- * ============================================================================== */
-
-/**
- * Internal per-record shape after normalisation. One MSG91 push may contain
- * many of these (batch). Everything downstream (repo update, logging) works
- * off this shape only — the raw MSG91 payload never leaks past this file.
- */
+/** One delivery record. A single push can contain many. */
 export type NormalisedDlr = {
-  /** MSG91 request id we recorded at send time (msg91_request_id column). */
+  /** MSG91 request id saved at send time. */
   providerRequestId: string;
-  /** Recipient E.164-without-plus (as MSG91 sends it). */
+  /** Recipient, as sent by MSG91 (e.g. '919812345678'). */
   mobile: string;
-  /** Bucketed final status. */
   status: 'delivered' | 'failed' | 'rejected';
-  /** Free-text carrier reason from MSG91 (e.g. "ABSENT SUBSCRIBER", "DND Failure"). */
+  /** Carrier reason text from MSG91. */
   description: string | null;
-  /** Raw numeric status code MSG91 sent (1|2|16 typically). */
+  /** MSG91 numeric status code. */
   providerStatusCode: number | null;
 };
 
 /**
- * Parse whatever MSG91 sent — body may already be a JSON object/array, or a
- * URL-encoded form body carrying a `data` field whose value is a JSON string
- * (the legacy shape). Returns [] for anything unrecognised so the route can
- * 200-OK without persisting garbage.
+ * Normalises any DLR body MSG91 sends: a form body with a JSON `data` string,
+ * a flat record { reqid, status, desc, number }, a grouped record
+ * { requestId, numbers: { <mobile>: { status, desc } } }, or arrays of these.
+ * Returns [] for anything unrecognised.
  */
 export function parseDlrPayload(raw: unknown): NormalisedDlr[] {
   if (raw === null || raw === undefined) return [];
 
-  // Legacy transport: form-encoded { data: "<json-string>" }
+  // Form body: { data: "<json string>" }
   if (typeof raw === 'object' && !Array.isArray(raw) && 'data' in raw) {
     const inner = (raw as { data: unknown }).data;
     if (typeof inner === 'string') {
@@ -97,8 +52,6 @@ export function parseDlrPayload(raw: unknown): NormalisedDlr[] {
     return parseDlrPayload(inner);
   }
 
-  // Array — may be array of flat records (shape A) or array of grouped
-  // records (shape B). Flatten either way.
   if (Array.isArray(raw)) {
     const out: NormalisedDlr[] = [];
     for (const item of raw) {
@@ -110,7 +63,7 @@ export function parseDlrPayload(raw: unknown): NormalisedDlr[] {
   if (typeof raw !== 'object') return [];
   const obj = raw as Record<string, unknown>;
 
-  // Shape B: { requestId, numbers: { "<mobile>": { status, desc } } }
+  // Grouped record
   if ('numbers' in obj && typeof obj['numbers'] === 'object' && obj['numbers'] !== null) {
     const requestId = readString(obj['requestId']) ?? readString(obj['reqid']);
     if (!requestId) return [];
@@ -133,7 +86,7 @@ export function parseDlrPayload(raw: unknown): NormalisedDlr[] {
     return out;
   }
 
-  // Shape A: flat { reqid, status, desc, number, date }
+  // Flat record
   const requestId = readString(obj['reqid']) ?? readString(obj['requestId']);
   const mobile = readString(obj['number']) ?? readString(obj['mobile']);
   const code = readNumber(obj['status']);
@@ -149,10 +102,6 @@ export function parseDlrPayload(raw: unknown): NormalisedDlr[] {
     },
   ];
 }
-
-/* -----------------------------------------------------------------
- * Local helpers
- * ----------------------------------------------------------------- */
 
 function readString(v: unknown): string | null {
   if (typeof v === 'string' && v.length > 0) return v;
@@ -170,12 +119,8 @@ function readNumber(v: unknown): number | null {
 }
 
 /**
- * Bucket the MSG91 numeric code. Per their delivery-report API doc:
- *   1  = delivered
- *   2  = failed (transient / carrier-reported failure)
- *   16 = rejected (DLT / DND / permanent block)
- * Anything else is treated as an intermediate/unknown status and skipped —
- * we only want to persist terminal states.
+ * MSG91 status → final status: 1 delivered, 2 failed, 16 rejected.
+ * Other codes are not final and are skipped.
  */
 function mapStatus(code: number | null): 'delivered' | 'failed' | 'rejected' | null {
   if (code === 1) return 'delivered';

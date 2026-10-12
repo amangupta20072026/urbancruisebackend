@@ -1,21 +1,8 @@
 /**
- * ==============================================================================
- * Redis client — singleton
- * ==============================================================================
- * ioredis instance created ONCE at module load. Import `redis` anywhere.
- *
- * WHY IOREDIS (not node-redis): auto-reconnect, offline queue, cluster-ready
- * out of the box. Our OTP hot path cannot tolerate a "sorry, disconnected"
- * — ioredis buffers commands during reconnect and flushes them.
- *
- * Two clients might be needed later (pub/sub uses a dedicated connection),
- * but the OTP + session + idempotency workload is all request/response,
- * so ONE connection is enough for MVP.
- *
- * BullMQ (installed but not yet wired) will need its own connection object;
- * pass a factory `() => new Redis(opts)` when you set that up — do NOT share
- * this client, BullMQ's blocking commands would starve the OTP path.
- * ==============================================================================
+ * The shared Redis client (ioredis). It reconnects automatically and queues
+ * commands while reconnecting.
+ * BullMQ (in package.json, not used yet) must get its own connection: its
+ * blocking commands would stall this client.
  */
 import { Redis, type Redis as RedisClient } from 'ioredis';
 import { ENV } from '../../config/env.js';
@@ -26,27 +13,20 @@ export const redis: RedisClient = new Redis({
   port: ENV.REDIS_PORT,
   password: ENV.REDIS_PASSWORD,
 
-  // Retry with exponential backoff up to 5s. The alternative (fail-fast)
-  // would 500-out the OTP endpoint during a Redis restart.
+  // Reconnect delay grows 200 ms per attempt, capped at 5 s.
   retryStrategy: (times: number) => Math.min(times * 200, 5_000),
   maxRetriesPerRequest: 3,
 
-  // Enable keep-alive at the TCP layer — same reason as MySQL pool: keeps
-  // idle NAT/LB stickiness from dropping the connection.
+  // TCP keep-alive so idle connections aren't dropped by the network.
   keepAlive: 30_000,
 
-  // Fail early if the initial connect can't succeed within 10s.
   connectTimeout: 10_000,
 
-  // Lazy-connect off — we want to fail loudly at boot if creds are wrong.
+  // Connect at startup so connection problems show up immediately.
   lazyConnect: false,
 });
 
-/**
- * Set once closeRedis() starts. Lets the 'close' / 'end' listeners tell an
- * intentional shutdown (info) apart from an unexpected drop (warn), so every
- * deploy does not leave misleading warnings in the logs.
- */
+// True during shutdown, so an expected close logs as info, not warn.
 let closing = false;
 
 redis.on('connect', () => logger.info('redis connected'));
@@ -63,14 +43,9 @@ redis.on('end', () => {
 });
 
 /**
- * PING — used by /ready to prove Redis is reachable AND usable.
- *
- * Fails fast when the client is not in the 'ready' state (connecting,
- * reconnecting, closed, …). Without this guard the PING would sit in the
- * ioredis offline queue and be retried (maxRetriesPerRequest) across
- * reconnect attempts, so a probe against a dead Redis would hang for
- * seconds instead of reporting it down. Callers should still apply their
- * own timeout: a half-open TCP connection can look 'ready' and never reply.
+ * Health check for /ready. Fails at once if the client isn't 'ready'
+ * (otherwise PING would wait in the offline queue). Callers should still
+ * add a timeout: a dead connection can look 'ready'.
  */
 export async function pingRedis(): Promise<void> {
   if (redis.status !== 'ready') {
@@ -82,30 +57,13 @@ export async function pingRedis(): Promise<void> {
   }
 }
 
-/**
- * Upper bound for a graceful QUIT during shutdown. Must stay well below
- * SHUTDOWN_TIMEOUT_MS (15s) so a slow Redis can never push the process into
- * the hard force-exit path.
- */
+/** Max wait for QUIT on shutdown. Keep well below SHUTDOWN_TIMEOUT_MS. */
 export const REDIS_QUIT_TIMEOUT_MS = 3_000;
 
 /**
- * Graceful shutdown. Never throws, and always settles within
- * REDIS_QUIT_TIMEOUT_MS (+ a tick).
- *
- *   status 'end'     → already closed; nothing to do (idempotent).
- *   status 'ready'   → QUIT: Redis finishes in-flight commands, then closes.
- *                      If QUIT fails or exceeds the timeout → disconnect().
- *   any other status → disconnect() immediately. A QUIT issued while
- *                      connecting / reconnecting would sit in the offline
- *                      queue and stall shutdown until the force-exit fires.
- *
- * disconnect() drops the socket at once and cancels any pending reconnect,
- * so after this function returns the client holds no timers or sockets that
- * could keep the event loop alive.
- *
- * Call it only AFTER the HTTP server has drained: in-flight requests still
- * need Redis for the JWT denylist and the rate limiters.
+ * Closes Redis on shutdown. Never throws. Uses QUIT when connected (falls
+ * back to disconnect on error or timeout), otherwise disconnects at once.
+ * Call only after the HTTP server has drained.
  */
 export async function closeRedis(timeoutMs: number = REDIS_QUIT_TIMEOUT_MS): Promise<void> {
   closing = true;

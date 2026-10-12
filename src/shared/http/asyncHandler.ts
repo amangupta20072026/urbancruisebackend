@@ -1,11 +1,6 @@
 /**
- * ==============================================================================
- * asyncHandler — legacy wrap-async-and-catch helper
- * ==============================================================================
- * Express 5 auto-catches rejected promises from async route handlers, so most
- * code no longer needs this. Keep it here for the rare case of a callback-style
- * handler that needs to forward a caught error to `next`.
- * ==============================================================================
+ * Forwards a rejected promise to next(). Express 5 already does this for
+ * async handlers; use only where a handler needs it explicitly.
  */
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 

@@ -1,63 +1,34 @@
 /**
- * ==============================================================================
- * Roles + customer taxonomy — SSoT for the app's user model
- * ==============================================================================
- * Kept structurally aligned with the RN app's `src/rbac/roles.ts` so client
- * and server never disagree about role semantics.
- *
- * TYPE SURFACE covers all four roles because the JWT payload carries `role`
- * regardless of which features are implemented server-side. RUNTIME behavior
- * is narrower — see `authenticate.ts`, which rejects any non-customer role
- * with 403 `ROLE_NOT_ENABLED` until the corresponding features land. When
- * (say) vendor features ship, delete that guard branch; nothing else changes.
- * ==============================================================================
+ * User roles and customer classification types. Should match the mobile
+ * app's role definitions. Which roles may log in is controlled by
+ * ENABLED_ROLES (see enabled-roles.ts). There are no sub-roles.
  */
 
-// ── Top-level role ─────────────────────────────────────────────────────────
 export type UserRole = 'customer' | 'vendor' | 'driver' | 'uc';
 
-// ── Customer taxonomy ──────────────────────────────────────────────────────
-// The customer domain has two levels:
-//   Category — high-level classification (personal / corporate / agent)
-//   Type     — specific sub-classification within a category
-//
-// Category and type are NOT independent. A "personal" customer can only have
-// type "personal"; a "corporate" customer picks from the corporate types;
-// an "agent" picks from the agent types. Modeling them as a discriminated
-// union (`CustomerClassification` below) makes invalid combinations impossible
-// to construct at compile time.
-//
-// `companyName` is required for corporate + agent, absent for personal —
-// same discriminated union expresses that constraint.
+// Customer category and its allowed types.
 
 export type CustomerCategory = 'personal' | 'corporate' | 'agent';
 
-/** Only value for category='personal'. */
+/** Types for category 'personal'. */
 export type PersonalCustomerType = 'personal';
 
-/** Sub-types under category='corporate'. */
+/** Types for category 'corporate'. */
 export type CorporateCustomerType =
   'company' | 'ngo' | 'educationalInstitute' | 'sportingCompany' | 'government';
 
-/** Sub-types under category='agent'. */
+/** Types for category 'agent'. */
 export type AgentCustomerType = 'travelAgent' | 'tourOperator' | 'hotel' | 'weddingPlanner' | 'dmc';
 
-/** Union of every legal customer-type value, regardless of category. */
+/** Any customer type. */
 export type CustomerType = PersonalCustomerType | CorporateCustomerType | AgentCustomerType;
 
 /**
- * The customer classification block. Use wherever a customer's category /
- * type / company name appear together — schema validation, DB row projection,
- * DTOs, etc. TypeScript refuses any of these bad shapes:
- *   { category: 'personal', type: 'company' }          // wrong type for personal
- *   { category: 'corporate', companyName: null }       // company name required
- *   { category: 'agent', type: 'ngo' }                 // ngo isn't an agent type
+ * Valid category/type/companyName combinations. Invalid ones (e.g. a
+ * personal customer with type 'company') do not compile. companyName is
+ * required for corporate and agent customers.
  */
 export type CustomerClassification =
   | { category: 'personal'; type: PersonalCustomerType; companyName: null }
   | { category: 'corporate'; type: CorporateCustomerType; companyName: string }
   | { category: 'agent'; type: AgentCustomerType; companyName: string };
-
-// ── No sub-roles ───────────────────────────────────────────────────────────
-// Login and access are decided by the top-level `UserRole` only. There is no
-// sub-role for any role (customer, vendor, driver or uc).

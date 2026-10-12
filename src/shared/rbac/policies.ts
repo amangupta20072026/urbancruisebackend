@@ -1,20 +1,8 @@
 /**
- * ==============================================================================
- * RBAC policies — coarse role×action×subject matrix
- * ==============================================================================
- * `can(identity, action, subject)` answers: "Is this ROLE allowed to perform
- * ACTION on any SUBJECT of this kind, in principle?" That's it. Whether the
- * user can actually operate on SUBJECT #123 depends on:
- *   1. tenant scoping (repository WHERE clause on identity.entityId)
- *   2. instance policy (module's policy.canOperate)
- *
- * SCOPE (step-one): only 'customer'. When vendor/driver/uc land, add rules
- * here and TypeScript's exhaustive checks on the Role union will refuse to
- * compile until every relevant subject has explicit coverage.
- *
- * Deliberately kept in ONE file so a security auditor has ONE table to read.
- * Rules are decided by top-level role only — there is no sub-role.
- * ==============================================================================
+ * Role-level permission table used by authorize(). Answers only "may this
+ * role do this action on this kind of resource". Access to a specific record
+ * must still be checked in the repository/service (e.g. by entityId).
+ * Anything not listed is denied.
  */
 import type { Identity } from '../types/identity.js';
 import type { Action } from './actions.js';
@@ -25,17 +13,14 @@ type Rule = (id: Identity) => boolean;
 const anyCustomer: Rule = id => id.role === 'customer';
 const nobody: Rule = () => false;
 
-/**
- * Matrix key = `${action}:${subject}`. Each cell is a predicate over Identity.
- * Missing key = deny by default. Add new rows explicitly.
- */
+// Key: `${action}:${subject}`.
 const MATRIX: Record<string, Rule> = {
-  // Enquiries — any customer can create + read their own.
+  // Enquiries
   'read:Enquiry': anyCustomer,
   'create:Enquiry': anyCustomer,
   'update:Enquiry': anyCustomer,
 
-  // Quotations — customer can read + accept/confirm; creation is UC-side (TBD).
+  // Quotations
   'read:Quotation': anyCustomer,
   'confirm:Quotation': anyCustomer,
 
@@ -45,14 +30,14 @@ const MATRIX: Record<string, Rule> = {
   'update:Booking': anyCustomer,
   'acknowledge:Booking': anyCustomer,
 
-  // Trips (read-only from customer side; state transitions are driver/UC-side)
+  // Trips (read-only for customers)
   'read:Trip': anyCustomer,
 
   // Payments
   'read:Payment': anyCustomer,
   'create:Payment': anyCustomer,
 
-  // Self / notifications / support / feedback
+  // Profile, notifications, support, feedback
   'read:Customer': anyCustomer,
   'update:Customer': anyCustomer,
   'read:Notification': anyCustomer,

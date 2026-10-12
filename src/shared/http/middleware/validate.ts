@@ -1,13 +1,6 @@
 /**
- * ==============================================================================
- * validate({ body?, params?, query? }) — Zod → 400
- * ==============================================================================
- * Zod schemas are the source of truth for request shapes. After validation,
- * `req.body / params / query` are typed via `z.infer<>` — controllers work
- * with the parsed data, never raw.
- *
- * Failure → ValidationError with the Zod issues attached to `details`.
- * ==============================================================================
+ * Validates body, params and query with Zod and replaces them with the
+ * parsed values. Throws ValidationError (400) with the issues.
  */
 import type { RequestHandler } from 'express';
 import type { ParamsDictionary } from 'express-serve-static-core';
@@ -15,7 +8,6 @@ import type { ParsedQs } from 'qs';
 import { z } from 'zod';
 import { ValidationError } from '../../errors/index.js';
 
-// z.ZodType is the non-deprecated replacement for ZodTypeAny in Zod 4.
 type AnySchema = z.ZodType;
 
 type Schemas = {
@@ -38,8 +30,6 @@ export function validate(schemas: Schemas): RequestHandler {
       if (!r.success) {
         throw new ValidationError('Invalid path parameters.', r.error.issues, 'VALIDATION_PARAMS');
       }
-      // Express types req.params as ParamsDictionary (Record<string,string>).
-      // The Zod-parsed shape is the source of truth — cast at the boundary.
       req.params = r.data as ParamsDictionary;
     }
     if (schemas.query) {
@@ -47,7 +37,7 @@ export function validate(schemas: Schemas): RequestHandler {
       if (!r.success) {
         throw new ValidationError('Invalid query string.', r.error.issues, 'VALIDATION_QUERY');
       }
-      // Express 5's req.query is a getter-only ParsedQs — write back via defineProperty.
+      // Express 5's req.query is a getter, so it can't be assigned directly.
       Object.defineProperty(req, 'query', {
         value: r.data as ParsedQs,
         writable: true,

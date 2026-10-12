@@ -1,15 +1,6 @@
 /**
- * ==============================================================================
- * Pino logger — the ONE logger the app uses
- * ==============================================================================
- * JSON to stdout in prod (fast, structured, ship-anywhere). `pino-pretty` is
- * used ONLY when NODE_ENV=development — on prod it's ~30× slower and formats
- * on the main thread. Never enable it in prod.
- *
- * `child({ requestId })` produces a sub-logger where every subsequent line
- * carries the same requestId — that's how correlation works throughout the
- * request lifecycle. The pino-http middleware sets this up automatically.
- * ==============================================================================
+ * The app's single pino logger: JSON to stdout, with secrets redacted.
+ * Pretty output (pino-pretty) only in development.
  */
 import pino, { type Logger } from 'pino';
 import { ENV } from '../../config/env.js';
@@ -37,7 +28,7 @@ export const logger: Logger = pino({
     remove: false,
   },
   formatters: {
-    // OTel-friendly level names — 'level' becomes a string, not a number.
+    // Log the level as a name ("info"), not a number.
     level: label => ({ level: label }),
   },
   ...(transport ? { transport } : {}),

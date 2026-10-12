@@ -1,11 +1,6 @@
 /**
- * ==============================================================================
- * Response helpers — uniform envelopes
- * ==============================================================================
- * Controllers call `ok(res, data)` / `created(res, data)` / etc. so every
- * successful response wraps in the same envelope, and the request-id is
- * always attached without controllers thinking about it.
- * ==============================================================================
+ * Success response helpers. Every response uses the same envelope and
+ * includes the request id.
  */
 import type { Request, Response } from 'express';
 import type { ApiResponse, PageMeta, Paginated } from '../types/api.js';
@@ -29,9 +24,8 @@ export function noContent(res: Response): Response {
 }
 
 /**
- * Page envelope. `meta` (optional) carries list-level facts such as an
- * unread count; it is omitted from the JSON entirely when not supplied, so
- * existing endpoints' responses are byte-for-byte unchanged.
+ * Paginated list response. meta (e.g. unread count) is included only when
+ * provided.
  */
 export function paginated<T>(
   res: Response,
@@ -55,9 +49,8 @@ export function paginated<T>(
 }
 
 /**
- * Fetch req.identity with a runtime assertion. Any route calling this MUST
- * have `authenticate` upstream. If it doesn't, this throws ForbiddenError
- * rather than returning undefined — clearer failure mode than a silent bug.
+ * Returns req.identity. The route must use authenticate; if it doesn't,
+ * this throws instead of returning undefined.
  */
 export function getIdentity(req: Request): Identity {
   if (!req.identity) throw new ForbiddenError('Not authenticated.', 'AUTH_UNAUTHENTICATED');

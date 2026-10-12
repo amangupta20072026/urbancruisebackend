@@ -21,10 +21,6 @@ import configModule from './modules/config/index.js';
 import customerModule from './modules/customer/index.js';
 import notificationsModule from './modules/notifications/index.js';
 
-/** Builds the Express app. Middleware order is intentional — keep it:
- * security → request id/context/logging → webhooks → body parsers →
- * rate limit → routes → 404 → error handler.
- */
 export function buildApp(): Express {
   const app = express();
 

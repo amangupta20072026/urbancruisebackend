@@ -12,6 +12,13 @@ type Rule = (id: Identity) => boolean;
 
 const anyCustomer: Rule = id => id.role === 'customer';
 const nobody: Rule = () => false;
+/**
+ * Any signed-in role. Only for "own data" resources whose repository
+ * scopes every query by the caller's (role, entityId) from the access
+ * token — never for shared business records. Disabled roles are still
+ * rejected earlier by authenticate (ENABLED_ROLES).
+ */
+const anySignedIn: Rule = () => true;
 
 // Key: `${action}:${subject}`.
 const MATRIX: Record<string, Rule> = {
@@ -40,7 +47,9 @@ const MATRIX: Record<string, Rule> = {
   // Profile, notifications, support, feedback
   'read:Customer': anyCustomer,
   'update:Customer': anyCustomer,
-  'read:Notification': anyCustomer,
+  // Own inbox: notifications/repository.ts scopes every query by
+  // (role, entity_id) from the token, so every role sees only its own.
+  'read:Notification': anySignedIn,
   'read:Support': anyCustomer,
   'create:Feedback': anyCustomer,
 };

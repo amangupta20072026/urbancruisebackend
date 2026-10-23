@@ -7,7 +7,11 @@ import { AuthError, ForbiddenError } from '../../../shared/errors/index.js';
 import { logger } from '../../../shared/logger/index.js';
 import { maskMobile } from '../../../shared/utils/phone.js';
 import { AUTH_ERROR } from '../types.js';
-import type { AuthenticatedResponseDto, CustomerOnboardingDetails, DeviceMeta } from '../types.js';
+import type {
+  CustomerOnboardResponseDto,
+  CustomerOnboardingDetails,
+  DeviceMeta,
+} from '../types.js';
 import type { AuthServiceDeps } from '../infrastructure/AuthContainer.js';
 import { mintAuthenticatedSession } from './mint-session.js';
 import { assertRoleEnabled } from '../../../shared/rbac/enabled-roles.js';
@@ -23,7 +27,7 @@ export type CompleteOnboardingParams = {
 export async function completeCustomerOnboarding(
   deps: AuthServiceDeps,
   p: CompleteOnboardingParams,
-): Promise<AuthenticatedResponseDto> {
+): Promise<CustomerOnboardResponseDto> {
   // Before consuming the ticket, so it stays usable if the role is re-enabled.
   assertRoleEnabled(deps.enabledRoles, 'customer');
 
@@ -63,10 +67,13 @@ export async function completeCustomerOnboarding(
     created ? 'customer onboarded' : 'onboarding hit an existing customer — logged in instead',
   );
 
-  return mintAuthenticatedSession(deps, user, {
+  const session = await mintAuthenticatedSession(deps, user, {
     mobile: ticket.mobile,
     device: p.device,
     ip: p.ip,
     userAgent: p.userAgent,
   });
+  // When an existing customer was found, the submitted details were not
+  // saved; the app uses this flag to skip the first-time welcome.
+  return { ...session, isNewAccount: created };
 }

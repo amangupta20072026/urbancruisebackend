@@ -123,6 +123,15 @@ export type OnboardingRequiredResponseDto = {
 
 export type VerifyOtpResponseDto = AuthenticatedResponseDto | OnboardingRequiredResponseDto;
 
+/**
+ * POST /auth/customer/onboard response. isNewAccount is false when a
+ * customer already existed for this mobile (the request logged into that
+ * account instead), so the app shows its first-time welcome only when true.
+ */
+export type CustomerOnboardResponseDto = AuthenticatedResponseDto & {
+  isNewAccount: boolean;
+};
+
 /** Onboarding ticket stored in Redis under the token's hash. */
 export type OnboardingTicket = {
   mobile: string;
@@ -130,11 +139,21 @@ export type OnboardingTicket = {
   issuedAt: number;
 };
 
+/**
+ * Customer kind chosen at onboarding (API value). Same values as the
+ * CustomerCategory type in shared/rbac/roles.ts. The repository maps it to
+ * the CRM's customers.customerType text; never write it to the DB as is.
+ */
+export type CustomerSignupType = 'personal' | 'corporate' | 'agent';
+
 /** Details collected at onboarding. */
 export type CustomerOnboardingDetails = {
   firstName: string;
   lastName: string | null;
   email: string | null;
+  customerType: CustomerSignupType;
+  /** Trimmed city name, saved as entered or as returned by the device. */
+  city: string;
 };
 
 /** POST /auth/otp/request response. Keep `channel`: shipped apps read it. */

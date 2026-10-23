@@ -68,6 +68,25 @@ const optionalTrimmed = (max: number) =>
     .nullable()
     .transform(v => (v ? v : null));
 
+/**
+ * City as typed or as returned by the device (length matches
+ * customers.customerCity, 100). Only whitespace is normalised: the spelling
+ * is kept. 'Unknown' is rejected because the CRM uses it as a placeholder
+ * for a missing city.
+ */
+const CITY_RE = /^[\p{L}][\p{L}\p{M} .'()-]*$/u;
+const CitySchema = z
+  .string()
+  .transform(v => v.trim().replace(/\s+/g, ' '))
+  .pipe(
+    z
+      .string()
+      .min(1, 'city is required')
+      .max(100)
+      .regex(CITY_RE, 'city contains invalid characters')
+      .refine(v => v.toLowerCase() !== 'unknown', { message: 'enter your city' }),
+  );
+
 export const CustomerOnboardBody = z.object({
   onboardingToken: z.string().min(20).max(200),
   firstName: z
@@ -82,6 +101,8 @@ export const CustomerOnboardBody = z.object({
   email: optionalTrimmed(100).refine(v => v === null || z.email().safeParse(v).success, {
     message: 'invalid email address',
   }),
+  customerType: z.enum(['personal', 'corporate', 'agent']),
+  city: CitySchema,
   device: DeviceMetaSchema,
 });
 export type CustomerOnboardBody = z.infer<typeof CustomerOnboardBody>;

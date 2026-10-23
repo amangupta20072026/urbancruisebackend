@@ -11,7 +11,12 @@ import { maskMobile } from '../../../shared/utils/phone.js';
 import { ServiceUnavailableError } from '../../../shared/errors/index.js';
 import { CUSTOMER_CREATE_LOCK_TIMEOUT_SECONDS } from '../../../config/constants.js';
 import { isRawPhoneAdminBlocked } from './mobile-registry.js';
-import type { CustomerOnboardingDetails, ResolvedUser, UserProfileDto } from '../types.js';
+import type {
+  CustomerOnboardingDetails,
+  CustomerSignupType,
+  ResolvedUser,
+  UserProfileDto,
+} from '../types.js';
 import {
   candidateFormats,
   placeholders,
@@ -20,6 +25,22 @@ import {
   normalisePhoneToE164,
   placeholder,
 } from './users-shared.js';
+
+/*
+ * Onboarding type → CRM columns. The CRM stores the main type in
+ * customerType ('Personal' | 'Corporate' | 'Travel Agent') and the sub-type
+ * in customerCategoryType. The app collects only the main type, so the
+ * sub-type is set only where it has one possible value (Personal) and is
+ * left NULL for staff to fill in otherwise. Spellings must match the CRM
+ * exactly: its filters and reports compare these strings.
+ */
+const CRM_CUSTOMER_COLUMNS: Readonly<
+  Record<CustomerSignupType, { customerType: string; customerCategoryType: string | null }>
+> = {
+  personal: { customerType: 'Personal', customerCategoryType: 'Personal' },
+  corporate: { customerType: 'Corporate', customerCategoryType: null },
+  agent: { customerType: 'Travel Agent', customerCategoryType: null },
+};
 
 /* DB row */
 type CustomerRow = RowDataPacket & {
@@ -99,10 +120,21 @@ export async function createCustomerIfAbsent(
       const existing = await findWith(conn, mobile);
       if (existing) return { user: existing, created: false };
 
+      const crm = CRM_CUSTOMER_COLUMNS[details.customerType];
       const [result] = await conn.execute<ResultSetHeader>(
-        `INSERT INTO customers (uuid, customerPhone, firstName, lastName, customerEmail, countryName)
-         VALUES (UUID(), ?, ?, ?, ?, 'India')`,
-        [dbPhone, details.firstName, details.lastName, details.email],
+        `INSERT INTO customers
+           (uuid, customerPhone, firstName, lastName, customerEmail,
+            customerType, customerCategoryType, customerCity, countryName)
+         VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, 'India')`,
+        [
+          dbPhone,
+          details.firstName,
+          details.lastName,
+          details.email,
+          crm.customerType,
+          crm.customerCategoryType,
+          details.city,
+        ],
       );
       const id = String(result.insertId);
       return {

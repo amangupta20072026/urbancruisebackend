@@ -54,6 +54,8 @@ export async function postCustomerOnboard(req: Request, res: Response): Promise<
       firstName: body.firstName,
       lastName: body.lastName ?? null,
       email: body.email ?? null,
+      customerType: body.customerType,
+      city: body.city,
     },
     device: body.device,
     ip: clientIp(req),
